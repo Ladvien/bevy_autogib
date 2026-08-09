@@ -1,6 +1,10 @@
-//! **The same fracture, on screen — and the launch is the caller's.**
+//! **Prefracture and swap, on screen — the thing the crate is actually for.**
 //!
-//! Press **Space** to break the shape again with a new seed. Chunks fly, tumble and settle.
+//! The subject stands there intact. A moment later it is replaced by its baked fragments, which fly.
+//! That swap *is* the technique: the fracture was computed before anything happened, and the "break"
+//! is one despawn and a spawn. Watch it loop.
+//!
+//! Press **Space** to break it early, or to break it again with a new seed.
 //!
 //! There is no physics engine here, and that is the point of the example rather than a shortcut. This
 //! crate hands you a mesh, a local centre and a half-extent per piece and stops; everything below
@@ -8,8 +12,19 @@
 //! Rapier or your own solver and nothing in `bevy_autogib` changes.
 //!
 //! Note the two materials. Each fragment comes back as two meshes — the subject's own outer skin and
-//! the cut faces alone — and that contrast is the entire visual read. Comment out the `cap` spawn
-//! below and the result immediately stops looking broken and starts looking disassembled.
+//! the cut faces alone — and that contrast is the entire visual read. Give the cap the same material
+//! as the skin and the result immediately stops looking broken and starts looking disassembled.
+//!
+//! **Some breaks log `dropping unclosed cut boundary` warnings, and they mean working, not broken.**
+//! The subject is a torso and a head — two closed shells that meet — so the merged solid is not a
+//! manifold at the seam, and a plane through that region can produce a boundary chain with no way to
+//! close. The slicer drops such a chain instead of fanning garbage over it, which leaves that face
+//! open. A real character (body + head + weapon) is non-manifold in exactly the same way; this is the
+//! honest case, not a rigged one.
+//!
+//! It is **per-seed, not per-break** — measured over one run of this loop: 4 dropped loops on break
+//! #0, none at all on #1 or #2. Whether a cut lands on the seam is the whole difference, which is
+//! also why a single observation of this example proves very little about the slicer either way.
 //!
 //! This is the only example here that needs a GPU.
 //!
@@ -29,6 +44,20 @@ const RESTITUTION: f32 = 0.35;
 /// Horizontal drag per second while sliding, so pieces settle instead of skating forever.
 const GROUND_DRAG: f32 = 4.0;
 
+/// **Playback rate, and the reason this example has one.** The launch above is tuned for a game, where
+/// a gib set is meant to read in a fraction of a second. At 1.0 the whole burst is over before a
+/// freshly-mapped window has finished its first few frames, so the first thing anyone saw was a
+/// settled pile — the interesting part had already happened offscreen. Slowing playback rather than
+/// weakening gravity keeps the trajectories exactly the ones a game would get.
+const PLAYBACK_SPEED: f32 = 0.4;
+
+/// Seconds the intact subject is shown before it breaks. Long enough that the window exists, the
+/// render pipeline has warmed, and a viewer has seen what is about to be destroyed — without which
+/// the swap has nothing to swap *from*.
+const INTACT_SECS: f32 = 2.5;
+/// Seconds the debris is left to fly and settle before the subject is restored and the loop repeats.
+const BROKEN_SECS: f32 = 7.0;
+
 /// The example's own physics. In a real game this is a rigid body from whichever solver you use —
 /// `bevy_autogib` never names one.
 #[derive(Component)]
@@ -39,26 +68,67 @@ struct Chunk {
     half_y: f32,
 }
 
-/// Bumped every time Space is pressed, so each break gets a different seed.
-#[derive(Resource, Default)]
-struct BreakCount(u32);
+/// The unbroken subject, before the swap.
+#[derive(Component)]
+struct Intact;
+
+/// Shared materials, made once. The subject's own surface, and the raw interior the cut exposed.
+#[derive(Resource)]
+struct DemoMaterials {
+    skin: Handle<StandardMaterial>,
+    interior: Handle<StandardMaterial>,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum Phase {
+    Intact,
+    Broken,
+}
+
+/// Drives the intact → broken → intact loop, so an observer who looked away still catches a break.
+#[derive(Resource)]
+struct Cycle {
+    timer: Timer,
+    phase: Phase,
+    /// Bumped every break, so each one slices along different planes.
+    breaks: u32,
+}
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "bevy_autogib — press Space to break it again".into(),
+                title: "bevy_autogib — prefracture and swap (Space to break)".into(),
                 // 0.19 takes physical pixels as `u32` — there is no `(f32, f32)` conversion.
                 resolution: (900u32, 640u32).into(),
                 ..default()
             }),
             ..default()
         }))
-        .init_resource::<BreakCount>()
-        .add_systems(Startup, (setup_scene, break_it).chain())
-        .add_systems(Update, (rebreak_on_space, integrate))
+        .insert_resource(Cycle {
+            timer: Timer::from_seconds(INTACT_SECS, TimerMode::Once),
+            phase: Phase::Intact,
+            breaks: 0,
+        })
+        .add_systems(Startup, setup_scene)
+        .add_systems(Update, (drive_cycle, integrate))
         .run();
 }
+
+/// The two shells the subject is made of, each with its transform relative to the subject root —
+/// the same `(&Mesh, Mat4)` pairs the ECS bake assembles by walking a scene's children.
+fn subject() -> [(Mesh, Mat4); 2] {
+    [
+        (Mesh::from(Cuboid::new(0.7, 1.1, 0.4)), Mat4::IDENTITY),
+        (
+            Mesh::from(Cuboid::new(0.4, 0.4, 0.4)),
+            Mat4::from_translation(Vec3::new(0.0, 0.74, 0.0)),
+        ),
+    ]
+}
+
+/// Where the subject stands: feet on the floor.
+const ORIGIN: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 
 fn setup_scene(
     mut commands: Commands,
@@ -67,7 +137,7 @@ fn setup_scene(
 ) {
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(3.4, 2.2, 4.6).looking_at(Vec3::new(0.0, 0.7, 0.0), Vec3::Y),
+        Transform::from_xyz(3.4, 2.2, 4.6).looking_at(Vec3::new(0.0, 0.9, 0.0), Vec3::Y),
     ));
     commands.spawn((
         // 0.19 spells this `shadow_maps_enabled`; it was `shadows_enabled` in earlier releases.
@@ -83,48 +153,85 @@ fn setup_scene(
             ..default()
         })),
     ));
+
+    let mats = DemoMaterials {
+        skin: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.30, 0.42, 0.52),
+            perceptual_roughness: 0.85,
+            ..default()
+        }),
+        interior: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.52, 0.09, 0.08),
+            perceptual_roughness: 0.55,
+            ..default()
+        }),
+    };
+    spawn_intact(&mut commands, &mut meshes, &mats);
+    commands.insert_resource(mats);
+}
+
+/// The subject before anything happens to it — one entity per shell, the skin material on both.
+fn spawn_intact(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &DemoMaterials) {
+    for (mesh, xform) in subject() {
+        commands.spawn((
+            Intact,
+            Mesh3d(meshes.add(mesh)),
+            MeshMaterial3d(mats.skin.clone()),
+            Transform::from_matrix(Mat4::from_translation(ORIGIN) * xform),
+        ));
+    }
+}
+
+/// Advance the loop, and honour Space. Breaking early just runs the same swap the timer would.
+fn drive_cycle(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mats: Res<DemoMaterials>,
+    mut cycle: ResMut<Cycle>,
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    intact: Query<Entity, With<Intact>>,
+    chunks: Query<Entity, With<Chunk>>,
+) {
+    cycle.timer.tick(time.delta());
+    let forced = keys.just_pressed(KeyCode::Space);
+    if !forced && !cycle.timer.just_finished() {
+        return;
+    }
+
+    // Space during the debris phase means "again, now" — so both paths end in a fresh break.
+    let restore = !forced && cycle.phase == Phase::Broken;
+    for e in &intact {
+        commands.entity(e).despawn();
+    }
+    for e in &chunks {
+        commands.entity(e).despawn();
+    }
+
+    if restore {
+        info!("restoring the intact subject");
+        spawn_intact(&mut commands, &mut meshes, &mats);
+        cycle.phase = Phase::Intact;
+        cycle.timer = Timer::from_seconds(INTACT_SECS, TimerMode::Once);
+        return;
+    }
+
+    info!("break #{} — fracturing", cycle.breaks);
+    break_it(&mut commands, &mut meshes, &mats, cycle.breaks);
+    cycle.breaks = cycle.breaks.wrapping_add(1);
+    cycle.phase = Phase::Broken;
+    cycle.timer = Timer::from_seconds(BROKEN_SECS, TimerMode::Once);
 }
 
 /// Fracture the subject and spawn every piece. This is the function a game's death handler replaces:
 /// same loop, but each chunk gets a real rigid body and collider instead of a [`Chunk`].
-fn break_it(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut breaks: ResMut<BreakCount>,
-    existing: Query<Entity, With<Chunk>>,
-) {
-    for e in &existing {
-        commands.entity(e).despawn();
-    }
+fn break_it(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &DemoMaterials, nth: u32) {
+    let owned = subject();
+    let parts: Vec<(&Mesh, Mat4)> = owned.iter().map(|(m, x)| (m, *x)).collect();
 
-    // A two-part solid, exactly as the ECS bake would see a character's scene.
-    let torso = Mesh::from(Cuboid::new(0.7, 1.1, 0.4));
-    let head = Mesh::from(Cuboid::new(0.4, 0.4, 0.4));
-    let parts = [
-        (&torso, Mat4::IDENTITY),
-        (&head, Mat4::from_translation(Vec3::new(0.0, 0.74, 0.0))),
-    ];
-
-    let seed = 0x00C0_FFEE_u32.wrapping_add(breaks.0.wrapping_mul(2_654_435_761));
-    breaks.0 = breaks.0.wrapping_add(1);
+    let seed = 0x00C0_FFEE_u32.wrapping_add(nth.wrapping_mul(2_654_435_761));
     let extent = 0.74;
     let pieces = fracture_mesh(&parts, TARGET, extent * MIN_FRACTION, seed, None);
-
-    // The subject's own surface, and the raw interior the cut exposed. Two materials, one read.
-    let skin = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.30, 0.42, 0.52),
-        perceptual_roughness: 0.85,
-        ..default()
-    });
-    let interior = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.52, 0.09, 0.08),
-        perceptual_roughness: 0.55,
-        ..default()
-    });
-
-    // Spawn origin: the solid stood with its feet on the floor.
-    let origin = Vec3::new(0.0, 1.0, 0.0);
 
     for (i, piece) in pieces.into_iter().enumerate() {
         // Deterministic per-fragment variation from the crate's own frozen hash — no rand dependency.
@@ -147,7 +254,7 @@ fn break_it(
         let chunk = commands
             .spawn((
                 Chunk { velocity, spin, half_y: piece.half_extents.y },
-                Transform::from_translation(origin + piece.center_local),
+                Transform::from_translation(ORIGIN + piece.center_local),
                 Visibility::default(),
             ))
             .id();
@@ -156,31 +263,18 @@ fn break_it(
         // itself rather than orbiting the origin.
         commands.entity(chunk).with_children(|parent| {
             if let Some(outer) = piece.outer {
-                parent.spawn((Mesh3d(meshes.add(outer)), MeshMaterial3d(skin.clone())));
+                parent.spawn((Mesh3d(meshes.add(outer)), MeshMaterial3d(mats.skin.clone())));
             }
             if let Some(cap) = piece.cap {
-                parent.spawn((Mesh3d(meshes.add(cap)), MeshMaterial3d(interior.clone())));
+                parent.spawn((Mesh3d(meshes.add(cap)), MeshMaterial3d(mats.interior.clone())));
             }
         });
     }
 }
 
-fn rebreak_on_space(
-    keys: Res<ButtonInput<KeyCode>>,
-    commands: Commands,
-    meshes: ResMut<Assets<Mesh>>,
-    materials: ResMut<Assets<StandardMaterial>>,
-    breaks: ResMut<BreakCount>,
-    existing: Query<Entity, With<Chunk>>,
-) {
-    if keys.just_pressed(KeyCode::Space) {
-        break_it(commands, meshes, materials, breaks, existing);
-    }
-}
-
 /// The example's whole solver: gravity, a ground bounce, and tumbling. Replace with yours.
 fn integrate(time: Res<Time>, mut chunks: Query<(&mut Chunk, &mut Transform)>) {
-    let dt = time.delta_secs();
+    let dt = time.delta_secs() * PLAYBACK_SPEED;
     if dt <= 0.0 {
         return;
     }

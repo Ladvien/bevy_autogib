@@ -87,11 +87,17 @@ fn main() {
     println!("  {} fragments · {total_skin} skin triangles · {total_cap} cut-face triangles", pieces.len());
     println!();
 
-    // Every piece with a cut face proves the cap closed: an unclosed boundary loop is dropped rather
-    // than emitted as a hole, so a cap triangle count of zero across the whole set would mean the
-    // slicer never found a watertight loop.
+    // **Read this count for exactly what it measures: at least one closed loop per fragment.** It is
+    // NOT a watertightness proof, and saying so would be the more flattering lie — a fragment can carry
+    // a cap here and still have lost a second loop that never closed, which the slicer drops rather than
+    // fanning garbage over. Those drops are `warn!`ed by the crate, and this example installs no
+    // `tracing` subscriber, so they are invisible from here: run `explode`, which does, to see them.
+    //
+    // They are expected for this input. A torso and a head are two closed shells that meet, so the
+    // merged solid is not a manifold at the seam, and a plane through that region produces boundary
+    // chains with no way to close. That is what a real multi-part character looks like.
     let capped = pieces.iter().filter(|p| p.cap.is_some()).count();
-    println!("  {capped} of {} fragments carry a watertight cut face.", pieces.len());
+    println!("  {capped} of {} fragments carry at least one closed cut face.", pieces.len());
 
     // Same seed, same pieces — the property the whole crate is built around.
     let again = fracture_mesh(&parts, TARGET, extent * MIN_FRACTION, seed, None);
