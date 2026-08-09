@@ -18,20 +18,33 @@ Be clear about what that last one costs, because it is a real trade and not a fr
 
 Each fragment comes back as **two** meshes — the subject's original outer skin, and the cut faces alone. Give them different materials. That contrast, outfit against raw interior, is the entire visual read; a fracture rendered in one material just looks like the model fell apart.
 
-```ignore
-use bevy_autogib::{AutogibPlugin, AutogibSystems, FractureSubject, DetachedPart, FractureCache};
+```rust
+use bevy::prelude::*;
+use bevy_autogib::{AutogibPlugin, AutogibSystems, DetachedPart, FractureCache, FractureSubject};
 
-app.add_plugins(AutogibPlugin)
-    .configure_sets(Update, AutogibSystems.run_if(in_state(GameState::Playing)));
+#[derive(States, Debug, Clone, PartialEq, Eq, Hash, Default)]
+enum GameState { #[default] Playing, Paused }
+
+fn wire(app: &mut App) {
+    app.add_plugins(AutogibPlugin)
+        // The crate configures no run condition — when the bake runs is yours.
+        .configure_sets(Update, AutogibSystems.run_if(in_state(GameState::Playing)));
+}
 
 // Mark what should break, and what should come off intact.
-commands.spawn((FractureSubject(scene.clone()), WorldAssetRoot(scene), /* .. */));
-commands.entity(rifle_node).insert(DetachedPart);
+fn spawn_enemy(mut commands: Commands, assets: Res<AssetServer>) {
+    let scene: Handle<WorldAsset> = assets.load("enemy.glb#Scene0");
+    let enemy = commands.spawn((FractureSubject(scene.clone()), WorldAssetRoot(scene))).id();
+    // ...once the scene streams in, tag whatever should detach intact:
+    commands.entity(enemy).insert(DetachedPart);
+}
 
-// Later, at the moment of death:
-let Some(fragments) = cache.fragments(source) else { return };
-for frag in fragments {
-    // frag.center_local, frag.half_extents, frag.outer_mesh, frag.cap_mesh — the launch is yours.
+// Later, at the moment of death — the launch is yours, and so is the solver.
+fn on_death(cache: Res<FractureCache>, subject: &FractureSubject) {
+    let Some(fragments) = cache.fragments(subject.0.id()) else { return };
+    for frag in fragments {
+        let _ = (&frag.outer_mesh, &frag.cap_mesh, frag.center_local, frag.half_extents);
+    }
 }
 ```
 
