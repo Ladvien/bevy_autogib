@@ -1,0 +1,43 @@
+[package]
+name = "bevy_autogib"
+version = "0.1.0"
+edition = "2024"
+description = "Runtime mesh fracture for Bevy: recursively plane-cut a character's own meshes into watertight-capped chunks, bake them once per source asset, and swap them in when it dies."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Ladvien/bevy_autogib"
+keywords = ["bevy", "gamedev", "fracture", "destruction", "mesh"]
+categories = ["game-development", "graphics"]
+publish = false
+
+[dependencies]
+# The umbrella with defaults off, matching `bevy_speech_bubbles`' precedent in the parent workspace.
+# The bake reads whatever scene a subject loads and writes `Mesh` assets back, so it needs the asset
+# arena, the mesh types, PBR's material handle for the detached part, the ECS/app to be a plugin at all,
+# and `log` for the loud refusals that are this crate's answer to bad input.
+bevy = { version = "0.19.0", default-features = false, features = [
+    "bevy_asset",   # Assets<Mesh>, Handle<T>, AssetId<T>, AssetPath, RenderAssetUsages
+    "bevy_mesh",    # Mesh, Mesh3d, Indices, PrimitiveTopology, VertexAttributeValues
+    "bevy_pbr",     # StandardMaterial / MeshMaterial3d — the detached part keeps its own material
+    "bevy_scene",   # WorldAsset: the scene handle a subject is keyed by
+    "bevy_log",     # warn!/error!/info! — a refusal has to be visible
+    "std",
+] }
+# The five bake dials deserialize, so a caller can author them in a data file rather than hardcoding
+# fragment counts. Optional because a caller that builds `FractureSettings` in code needs none of it.
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+# **Examples only.** The crate's own `bevy` above is trimmed to what a bake needs. A runnable example
+# additionally needs a window, an event loop (winit) and the 3D render pipeline, so it takes the full
+# umbrella here, where it cannot reach a consumer's dependency graph. `tests/leaf.rs` reads
+# `[dependencies]` only, deliberately.
+[dev-dependencies]
+bevy = { version = "0.19.0" }
+
+[features]
+default = ["serde"]
+
+# **The vertex-soup sort's runtime tie check.** Off in a release build (it costs a pass over the parts
+# list); on automatically under `debug_assertions`; and turned on explicitly by a test harness that
+# builds in release but still wants the check — which is what the parent game's `test-harness` feature
+# does. See `bake::sort_total_by_key_at`.
+strict-order = []
