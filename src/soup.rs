@@ -22,9 +22,8 @@ const WELD: f32 = 1.0e-4;
 /// **Hand-rolled, and pinned.** There is deliberately no RNG crate here. The fracture's whole
 /// reproducibility argument rests on this function returning the same bits on every machine and every
 /// toolchain, and a dependency that reserves the right to change its stream between minor versions
-/// cannot promise that. It is the PCG-style integer hash the game this was extracted from has used
-/// since the beginning; the parent repo freezes its output in `tests/rng_guard.rs` and this crate
-/// freezes the same values in [`mod tests`](self), so the two copies cannot drift without a red test.
+/// cannot promise that. Its exact output is frozen by a test in this crate, so the fracture cannot move
+/// underneath you without something going red.
 pub fn hash_f32(x: u32) -> f32 {
     let mut h = x.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
     h = ((h >> ((h >> 28).wrapping_add(4))) ^ h).wrapping_mul(277_803_737);
@@ -435,9 +434,8 @@ mod tests {
     /// **The fracture RNG is frozen.**
     ///
     /// These bits are the whole reproducibility story: [`hash_f32`] drives every cut plane's direction,
-    /// so a changed constant re-partitions every mesh this crate has ever fractured. The parent repo
-    /// pins the identical values for its own copy in `tests/rng_guard.rs`; if these two ever disagree,
-    /// one of them was edited and the fracture moved.
+    /// so a changed constant re-partitions every mesh this crate has ever fractured. Treat this test as
+    /// a lock, not a snapshot to re-bless: if it goes red, the fracture moved.
     #[test]
     fn hash_f32_is_frozen() {
         let got: Vec<u32> = (0..8u32).map(|i| hash_f32(i).to_bits()).collect();
@@ -445,8 +443,7 @@ mod tests {
             got,
             [1022846460, 1059634922, 1056243097, 1056841197, 1042407458, 1057018071, 1064390834, 1056755236],
             "the fracture RNG moved. Every cut plane's direction comes from these bits, so a change \
-             here re-partitions every mesh this crate has ever fractured. The parent repo pins the \
-             identical eight values in `tests/rng_guard.rs::hash_f32_is_frozen`."
+             here re-partitions every mesh this crate has ever fractured."
         );
         // Every value must land in [0, 1) — the contract `random_dir` multiplies against.
         for i in 0..1024u32 {

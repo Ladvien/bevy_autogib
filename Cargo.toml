@@ -38,6 +38,5 @@ default = ["serde"]
 
 # **The vertex-soup sort's runtime tie check.** Off in a release build (it costs a pass over the parts
 # list); on automatically under `debug_assertions`; and turned on explicitly by a test harness that
-# builds in release but still wants the check — which is what the parent game's `test-harness` feature
-# does. See `bake::sort_total_by_key_at`.
+# builds in release but still wants the check on. See `bake::sort_total_by_key_at`.
 strict-order = []

@@ -18,11 +18,11 @@ Two runs of the same build on the same asset must produce bit-identical fragment
 
 **Never append to the vertex soup during the `Children` walk.** glTF scene-child order is the order async instantiation happened to add nodes, which is wall-clock dependent. Fragment centroids are float sums over the merged soup, float addition is not associative, and so an unsorted soup moves every centroid by a few ULPs — identical fragment count, positions off in the last bits. Collect first, sort by `(mesh asset path, world-matrix bits)`, then append. The mesh's own `AssetId` was tried as that key and was the *same bug over again*, on a subset of the soup.
 
-**`sort_total_by_key_at` is a deliberate second copy** of the parent repo's `util::sort_total_by_key_at`. This crate is a leaf and cannot import the game's. The one call site is the one place here whose input is an ECS query, which is exactly where a runtime tie check earns its keep — so do not downgrade it to a `SORT-OK:` comment the way the other extracted crates legitimately do. Its check compiles out in release and is turned back on by the `strict-order` feature, which the parent game's `test-harness` feature forwards to.
+**`sort_total_by_key_at` earns its runtime check — do not downgrade it to a comment.** Its one call site is the one place in this crate whose input is an ECS query, and query order is not stable across `App` instances. A comment asserting the key is total cannot fail; the check can, and it is what caught the soup-order bug above. It compiles out in release and is turned back on by the `strict-order` feature, for a harness that builds in release and still wants it.
 
-**`hash_f32` is frozen by a test here and by `tests/rng_guard.rs` upstream.** Two copies, one value; if they ever disagree, one was edited and every fracture moved. There is deliberately no RNG dependency — a stream that may change between minor versions cannot underwrite any of this.
+**`hash_f32` is frozen by a test.** It seeds every cut plane's direction, so a one-constant edit re-partitions every mesh this crate has ever fractured. Treat that test as a lock, not a snapshot to re-bless. There is deliberately no RNG dependency — a stream that may change between minor versions cannot underwrite any of this.
 
-**The bake gate treats an empty detached part as "still streaming", never as "absent".** When the held item is a separate scene from the body it streams on its own schedule: the `DetachedPart` entity exists immediately but has no `Mesh3d` descendants yet, so `all_loaded` stays true and the bake would cache a source with an empty chunk and mark it baked **permanently**. Measured in the parent game: 11 of 12 runs flung the weapon and 1 did not, which shifted a fixed-size chunk ring by one and diverged everything foraging on it. If a subject with genuinely no detached part is ever supported, this gate must learn to tell "absent" from "not yet" — do not relax it back.
+**The bake gate treats an empty detached part as "still streaming", never as "absent".** When the held item is a separate scene from the body it streams on its own schedule: the `DetachedPart` entity exists immediately but has no `Mesh3d` descendants yet, so `all_loaded` stays true and the bake would cache a source with an empty chunk and mark it baked **permanently**. Measured: 11 of 12 runs produced the chunk and 1 did not. If anything downstream is a fixed-size pool or a numbered sequence, losing one chunk shifts every later one, so the race does not stay cosmetic. If a subject with genuinely no detached part is ever supported, this gate must learn to tell "absent" from "not yet" — do not relax it back.
 
 ## Rules
 
@@ -34,6 +34,12 @@ Two runs of the same build on the same asset must produce bit-identical fragment
 - **One path per feature.** No fallbacks, no legacy shims, no stub placeholders. `seed_from_path` refusing to bake an unpathed handle *is* the rule: falling back to the `AssetId` for one sub-mesh would reintroduce the instability intermittently, which is worse than not baking.
 - **This crate never learns what died.** No health, no factions, no damage, no physics. `tests/leaf.rs` enforces the dependency half of that; the naming half is on you — nothing here should say "gun", "figurine", or "unit".
 
-## In the monorepo
+## Where the boundary falls
 
-The game wraps this as `src/autogib.rs`, which keeps only what is that game's content: the system that finds VALKYRIE's rifle node by name and tags it `DetachedPart`, and the `RunState` gate on `AutogibSystems`. `src/squad.rs` re-exports `FractureSubject`/`DetachedPart` under the game's own names, and `src/gore.rs` owns the spawning — Avian bodies, colliders, the chunk ring, and the launch impulse. Root `CLAUDE.md` and `TESTING.md` carry the project-wide rules; neither is part of this mirror.
+Three things belong to the caller, not here, and each has bitten someone who assumed otherwise:
+
+- **Naming the part that detaches.** Finding a weapon node by name is content, not fracture. Tag it `DetachedPart` from your own system, `.before(AutogibSystems)`.
+- **Deciding when the bake may run.** The plugin sets no run condition. Gate `AutogibSystems` on your own state.
+- **Everything after the fragment exists.** Rigid bodies, colliders, launch impulses, pooling, despawn. This crate hands out a mesh, a local centre and a half-extent, and stops.
+
+If a change here would need to know what died, or which solver you use, it belongs on your side of that line.

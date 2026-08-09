@@ -81,10 +81,10 @@ impl FractureCache {
 
 /// **Sort by a key that must be a TOTAL order — and prove it, don't assert it in a comment.**
 ///
-/// A deliberate second copy of the parent repo's `util::sort_total_by_key_at`. This crate is a leaf and
-/// cannot import the game's, and the one site that uses it is the one site in this crate whose input is
-/// an ECS query — where the runtime check is the whole point. Downgrading it to a comment, the form the
-/// other extracted crates use, would drop exactly the check that caught the bug below.
+/// The one site that uses it is the one site in this crate whose input is an ECS query — which is
+/// exactly where a runtime check earns its keep, because query order is not stable across `App`
+/// instances. A comment asserting the key is total cannot fail; this can, and it is what caught the
+/// bug described below.
 ///
 /// Under `debug_assertions` or the `strict-order` feature it **panics naming the call site and the
 /// duplicated key** the moment a tie occurs. A release build pays nothing.
@@ -124,8 +124,8 @@ where
 ///
 /// An `AssetId` is a **slot index in the asset arena**, assigned by async load order — so the same
 /// asset gets a different id run to run, hashes to a different seed, and `fracture` slices the body
-/// along **completely different planes**. Measured in the game this was extracted from: two same-seed
-/// builds produced **23 of 23 fragments differing**, in `half_extents` as well as `center_local` — the
+/// along **completely different planes**. Measured before the fix: two same-seed builds produced
+/// **23 of 23 fragments differing**, in `half_extents` as well as `center_local` — the
 /// mesh was being partitioned differently, not merely rounded differently. Every downstream symptom
 /// (chunk positions differing by ULPs, the load-dependence that made it look like a race) follows from
 /// the fracture planes moving.
@@ -239,7 +239,7 @@ pub fn bake_fractures(
         // the property this needed.
         //
         // A path is authored rather than allocated, so it is identical across runs, processes and
-        // machines. glTF sub-meshes are path-backed (`characters/valkyrie.glb#Mesh0/Primitive0`).
+        // machines. glTF sub-meshes are path-backed (`enemy.glb#Mesh0/Primitive0`).
         let mut parts: Vec<(String, [u32; 16], Mat4, bool, Entity, Handle<Mesh>)> = Vec::new();
         let mut unpathed_mesh = false;
         while let Some((e, mat, in_part)) = stack.pop() {
@@ -305,8 +305,8 @@ pub fn bake_fractures(
         // descendants to find — so `all_loaded` stays true (nothing unloaded was *seen*) and `body` is
         // non-empty, and this baked a source with an EMPTY detached chunk and then marked it `baked`
         // **permanently**. Whether that race was won decided, for the whole run, whether a death flung
-        // the weapon at all — which in the parent game shifted a fixed-size chunk ring by one and
-        // diverged the creatures foraging on it. Measured: 11 of 12 runs had the chunk and 1 did not.
+        // the weapon at all. If anything downstream is a fixed-size pool or a numbered sequence, losing
+        // one chunk shifts every later one. Measured: 11 of 12 runs had the chunk and 1 did not.
         //
         // Empty part ⇒ "still streaming", never "this subject has no detached part". If a subject
         // without one is ever supported, this gate must learn to tell "absent" from "not yet", not be
