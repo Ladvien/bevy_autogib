@@ -18,7 +18,12 @@ bevy = { version = "0.19.0", default-features = false, features = [
     "bevy_asset",   # Assets<Mesh>, Handle<T>, AssetId<T>, AssetPath, RenderAssetUsages
     "bevy_mesh",    # Mesh, Mesh3d, Indices, PrimitiveTopology, VertexAttributeValues
     "bevy_pbr",     # StandardMaterial / MeshMaterial3d — the detached part keeps its own material
-    "bevy_scene",   # WorldAsset: the scene handle a subject is keyed by
+    # `WorldAsset` — the scene handle a subject is keyed by. It lives in
+    # `bevy_world_serialization`, NOT `bevy_scene`, and naming the wrong one here still built for a
+    # long time: `cargo test` pulls the dev-dependency full umbrella, which enables everything, so the
+    # gap only appears in a build that does not. `cargo build --release -p bevy_autogib` is the check.
+    "bevy_world_serialization",
+    "bevy_scene",   # the scene types `bevy_world_serialization` is layered over
     "bevy_log",     # warn!/error!/info! — a refusal has to be visible
     "std",
 ] }

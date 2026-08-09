@@ -1,0 +1,54 @@
+# CI for the standalone `bevy_autogib` mirror.
+#
+# **This path is inert upstream and live here.** GitHub only reads workflows from `.github/` at a
+# repository root, so in the monorepo this file is an ordinary text file that nothing runs. The
+# `git subtree split` that produces the mirror lifts `crates/bevy_autogib/` to the root — and this
+# file with it — so it becomes the mirror's CI without the monorepo ever gaining a second workflow.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (standalone) + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bevy's Linux build needs ALSA / udev / windowing dev headers even though nothing here opens a
+      # window. No GPU is used: every test in this crate is CPU geometry.
+      - name: Install Bevy build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # **The load-bearing step, and it is `build` rather than `test` for a specific reason.**
+      #
+      # `cargo test` compiles dev-dependencies, and this crate's dev-dependency is the FULL `bevy`
+      # umbrella (the windowed example needs winit and the render pipeline). Cargo unifies features,
+      # so under `cargo test` the crate silently gets every `bevy` feature there is — which means a
+      # missing entry in its own `[dependencies]` feature list cannot fail.
+      #
+      # That is not hypothetical: `WorldAsset` was reached for while only `bevy_scene` was declared,
+      # not `bevy_world_serialization`. Every test passed and the crate did not build on its own.
+      # A plain `cargo build` takes no dev-dependencies, so it compiles exactly the feature set a
+      # consumer gets. It is the only step here that checks the crate is actually usable.
+      - name: Build with only the declared features
+        run: cargo build --release
+
+      - name: Test
+        run: cargo test
+
+      # Both examples must compile — a crate nobody can run is a crate nobody adopts. `explode` opens
+      # a window when run, but building it needs no display.
+      - name: Build examples
+        run: cargo build --examples
