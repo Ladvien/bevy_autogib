@@ -59,3 +59,31 @@ neither number was pinned by any test — which is what AG-012 exists to fix.
 
 **Boundary held:** examples take the full `bevy` umbrella from `[dev-dependencies]`, so none of this
 reaches a consumer's graph, and `tests/leaf.rs` — which reads `[dependencies]` alone — is untouched.
+
+---
+
+## Phase 0 — Baseline before the rewrite
+
+### ☑ AG-012 · Pin the torso+head baseline in a test
+
+`known_baseline_torso_and_head_is_mostly_not_solid` in `src/audit.rs` now asserts all four figures the
+architecture argument rests on: **7 of 12 watertight, 2 of 12 manifold, 4 of 12 collider-ready, 22 open
+cut edges**, at `TARGET = 12`, `seed = 0x00C0_FFEE`. Counts are computed exactly as
+`examples/fracture_cube.rs` prints them.
+
+> **The premise held, and it was worse than stated.** The ticket said these numbers were unpinned. They
+> were: no test referenced the torso+head fixture at all, and the only fixture CI locked was the convex
+> `Cuboid` — the one case that was never broken. So the suite was green *because* it only ever measured
+> the case the capper handles correctly.
+
+**Amendment:** the test also asserts `audits.len() == 12`. `audit_fragments` silently omits any fragment
+it cannot measure, so without that line a fragment dropping out of the population would make every count
+below it a comparison against a different denominator — and it would read as an improvement.
+
+**Known duplication, deliberately left.** The fixture exists twice: `torso_and_head()` in the test module
+and the same two `Cuboid`s in `examples/fracture_cube.rs`. Sharing it would mean exporting a test fixture
+from the crate's public API, which is a worse trade than a doc comment on each naming the other. AG-004
+touches both and should re-check they still agree.
+
+**This test is expected to go red when AG-001 lands, and that is the deliverable** — it is the baseline
+half of a pre-registered prediction, not a target. AG-004 retires it.

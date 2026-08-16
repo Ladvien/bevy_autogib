@@ -353,6 +353,67 @@ mod tests {
         Mesh::from(Cuboid::new(1.0, 2.0, 1.0))
     }
 
+    /// The two-shell subject: a torso box and a head box that overlap at the neck.
+    ///
+    /// **This is the honest case, not a rigged one.** Two closed shells that meet are not a manifold at
+    /// the seam, and an artist-exported glTF character (body, head, held item) is non-manifold in
+    /// exactly the same way. Kept identical to `examples/fracture_cube.rs` so the example and the test
+    /// are measuring one thing.
+    fn torso_and_head() -> [Mesh; 2] {
+        [Mesh::from(Cuboid::new(0.6, 1.0, 0.35)), Mesh::from(Cuboid::new(0.34, 0.34, 0.34))]
+    }
+
+    /// The fracture `examples/fracture_cube.rs` runs, to the digit.
+    fn torso_and_head_fracture(parts: &[Mesh; 2]) -> Vec<FragmentGeometry> {
+        let placed = [
+            (&parts[0], Mat4::IDENTITY),
+            (&parts[1], Mat4::from_translation(Vec3::new(0.0, 0.67, 0.0))),
+        ];
+        // `extent` is the merged solid's largest bounding half-dimension; `MIN_FRACTION` is 0.15.
+        fracture_mesh(&placed, 12, 0.67 * 0.15, 0x00C0_FFEE, None)
+    }
+
+    /// **AG-012 — a baseline, not a target. Read the second paragraph before you touch it.**
+    ///
+    /// These four numbers are the ones the whole architectural argument in `BACKLOG.md` rests on, and
+    /// until this test they were asserted by *nothing*: they were runtime output of an example and
+    /// prose in `docs/research-brief.md`. Regressing the fracture to 3 of 12 watertight and 40 open cut
+    /// edges would have left every test green and only made the prose quietly wrong. The one fixture CI
+    /// actually locked was the convex `Cuboid` — precisely the case that was never broken.
+    ///
+    /// **This test is expected to fail when Phase 1 lands, and that failure is the deliverable.**
+    /// AG-001 pre-registers 12/12 closed and 0 open cut edges on the *proxy*. A prediction measured
+    /// against an unpinned baseline cannot be falsified in the direction that matters, so this pins
+    /// where we started. AG-004 retires it: once the proxy and the render mesh are audited separately,
+    /// asserting a closed-solid test on a render mesh stops being meaningful. Until then, **do not
+    /// re-bless these numbers to make a red test green** — if they moved, say which change moved them.
+    ///
+    /// The counts are computed exactly as `examples/fracture_cube.rs` prints them, so the two cannot
+    /// drift apart.
+    #[test]
+    fn known_baseline_torso_and_head_is_mostly_not_solid() {
+        let parts = torso_and_head();
+        let pieces = torso_and_head_fracture(&parts);
+        assert_eq!(pieces.len(), 12, "the baseline is 12 fragments; the fracture returned a different count");
+
+        let audits = audit_fragments(&pieces);
+        // `audit_fragments` silently omits anything it cannot measure. If it ever does, every count
+        // below is taken over a smaller population and the comparison is meaningless.
+        assert_eq!(audits.len(), 12, "a fragment could not be audited, so these counts are not comparable");
+
+        let watertight = audits.iter().filter(|a| a.is_closed()).count();
+        let manifold = audits.iter().filter(|a| a.is_manifold()).count();
+        let collider_ready = audits.iter().filter(|a| a.supports_inside_outside).count();
+        let open_edges: u64 = audits.iter().map(|a| a.boundary_edges).sum();
+
+        let note = "AG-012 baseline moved. This is not a test to re-bless — name the change that moved \
+                    it, in the commit. AG-001 is the ticket allowed to move it, and AG-004 retires it.";
+        assert_eq!(watertight, 7, "watertight fragments: {note}");
+        assert_eq!(manifold, 2, "manifold fragments: {note}");
+        assert_eq!(collider_ready, 4, "collider-ready fragments: {note}");
+        assert_eq!(open_edges, 22, "total open cut edges: {note}");
+    }
+
     /// **The crate's central promise, tested against every byte for the first time.**
     ///
     /// The README says two runs of the same build on the same asset produce bit-identical fragments,
