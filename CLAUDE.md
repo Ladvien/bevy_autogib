@@ -4,11 +4,21 @@ Runtime mesh fracture: take whatever meshes an entity actually loaded, recursive
 
 ## Source of truth
 
-The source of truth for this crate is [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) at `crates/bevy_autogib/`. If you are reading this in a standalone `Ladvien/bevy_autogib` checkout, that is a read-only `git subtree split` mirror — **changes made here cannot be pulled back**. Make them upstream.
+**This repository is the source of truth.** [`Ladvien/bevy_autogib`](https://github.com/Ladvien/bevy_autogib) owns the crate; changes are made here and nowhere else. `foundation_vs_slop` consumes it as a git dependency pinned to a rev, the same way any other consumer would.
+
+**It was the other way round until this branch, and that inversion is a known stale-read hazard.** This repo used to be a read-only `git subtree split` mirror of `foundation_vs_slop/crates/bevy_autogib/`, and a `subtree split` carries only *commits* — so the whole audit harness, the `isomesh` dependency and both research docs, which lived uncommitted in the monorepo working tree, could never arrive by that route. A research agent read the mirror, found no `isomesh` in the manifest, and reported it as fact; the claim was true of what it read and false of the crate. If you find a `crates/bevy_autogib/` in any monorepo checkout, it is a corpse — read this repo instead.
 
 ## Build and test
 
-A leaf — `bevy` with defaults off plus optional `serde` — so it builds and tests on its own: `cargo test -p bevy_autogib`.
+A leaf — `bevy` with defaults off, optional `serde`, and `isomesh` for validation — so it builds and tests on its own, with no `-p` flag and no workspace above it:
+
+```
+cargo test              # 16 unit + leaf.rs + doctests
+cargo build --release   # NOT redundant: see below
+cargo build --examples
+```
+
+**`cargo build --release` is the load-bearing one.** `cargo test` compiles dev-dependencies, and the dev-dependency here is the *full* `bevy` umbrella (the windowed example needs winit and the render pipeline). Cargo unifies features, so under `cargo test` this crate silently gets every `bevy` feature there is and a missing entry in its own `[dependencies]` list cannot fail. That is not hypothetical — `WorldAsset` was reached for while only `bevy_scene` was declared, not `bevy_world_serialization`, and every test passed on a crate that did not build.
 
 ## The non-negotiable: the bake is reproducible, or it does not happen
 
