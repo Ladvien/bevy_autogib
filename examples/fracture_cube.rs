@@ -87,17 +87,37 @@ fn main() {
     println!("  {} fragments · {total_skin} skin triangles · {total_cap} cut-face triangles", pieces.len());
     println!();
 
-    // **Read this count for exactly what it measures: at least one closed loop per fragment.** It is
-    // NOT a watertightness proof, and saying so would be the more flattering lie — a fragment can carry
-    // a cap here and still have lost a second loop that never closed, which the slicer drops rather than
-    // fanning garbage over. Those drops are `warn!`ed by the crate, and this example installs no
-    // `tracing` subscriber, so they are invisible from here: run `explode`, which does, to see them.
-    //
-    // They are expected for this input. A torso and a head are two closed shells that meet, so the
-    // merged solid is not a manifold at the seam, and a plane through that region produces boundary
-    // chains with no way to close. That is what a real multi-part character looks like.
+    // **This used to be the only quality number here, and it was the weak one.** It counts fragments
+    // carrying at least one closed loop, which is not a watertightness proof — a fragment can carry a
+    // cap and still have lost a second loop that never closed.
     let capped = pieces.iter().filter(|p| p.cap.is_some()).count();
     println!("  {capped} of {} fragments carry at least one closed cut face.", pieces.len());
+    println!();
+
+    // **And this is the proof, or the refusal of it.** `audit_fragments` welds each fragment's skin and
+    // cut faces together and asks a mesh validator what it actually is: closed or open, manifold or
+    // not, consistently wound or inside out, and whether a solver could build inside/outside
+    // pseudo-normals from it.
+    //
+    // Open shards are EXPECTED for this input and are not a regression. A torso and a head are two
+    // closed shells that meet, so the merged solid is not a manifold at the seam, and a plane through
+    // that region produces boundary chains with no way to close — the slicer drops those rather than
+    // fanning garbage over them. What was missing until now was the count.
+    let audits = bevy_autogib::audit_fragments(&pieces);
+    let closed = audits.iter().filter(|a| a.is_closed()).count();
+    let manifold = audits.iter().filter(|a| a.is_manifold()).count();
+    let solid = audits.iter().filter(|a| a.supports_inside_outside).count();
+    let open_edges: u64 = audits.iter().map(|a| a.boundary_edges).sum();
+    let volume: f32 = audits.iter().filter(|a| a.is_closed()).map(|a| a.signed_volume).sum();
+
+    println!("   audit of {} fragments (skin ∪ cut faces, welded, then validated)", audits.len());
+    println!("  ─────────────────────────────────────────────────────────────────────────────────");
+    println!("   watertight (no boundary edges)      {closed:>3} of {}", audits.len());
+    println!("   manifold                            {manifold:>3} of {}", audits.len());
+    println!("   solid enough for a mesh collider    {solid:>3} of {}", audits.len());
+    println!("   open cut edges, total               {open_edges:>3}");
+    println!("   volume enclosed by the closed ones  {volume:>7.4}");
+    println!("  ─────────────────────────────────────────────────────────────────────────────────");
 
     // Same seed, same pieces — the property the whole crate is built around.
     let again = fracture_mesh(&parts, TARGET, extent * MIN_FRACTION, seed, None);

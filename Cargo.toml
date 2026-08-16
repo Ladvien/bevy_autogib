@@ -31,6 +31,20 @@ bevy = { version = "0.19.0", default-features = false, features = [
 # fragment counts. Optional because a caller that builds `FractureSettings` in code needs none of it.
 serde = { version = "1.0", features = ["derive"], optional = true }
 
+# **The mesh validator.** This crate could always cut a mesh; it could never say whether what came out
+# was closed, manifold or consistently wound — `examples/fracture_cube.rs` says so in as many words.
+# `isomesh` is what answers that, and it is an unusually cheap thing to admit: `no_std`, exactly one
+# dependency of its own (`libm`), and **no math library in its public API** — every signature is
+# `[f32; 3]`, so it cannot collide with the `glam` version Bevy 0.19 pins. That last property is why
+# this is a dependency at all rather than a vendored copy.
+#
+# **Pinned to a `rev`, and that is not caution — it is the same rule as `hash_f32`.** isomesh is under
+# active development in a sibling repo. An unpinned dependency whose welder or validator moved between
+# builds would move this crate's *output*, which is precisely the class of bug `seed_from_path` and the
+# canonical soup order exist to prevent. Bump it deliberately, in a commit that re-blesses the locked
+# topology counts, or not at all.
+isomesh = { git = "https://github.com/Ladvien/isomesh", rev = "4369e3c", default-features = false }
+
 # **Examples only.** The crate's own `bevy` above is trimmed to what a bake needs. A runnable example
 # additionally needs a window, an event loop (winit) and the 3D render pipeline, so it takes the full
 # umbrella here, where it cannot reach a consumer's dependency graph. `tests/leaf.rs` reads

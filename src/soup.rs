@@ -15,7 +15,12 @@ use bevy::math::{Vec2, Vec3};
 const EPS: f32 = 1.0e-5;
 /// Endpoint-weld lattice step for boundary-loop assembly (quantize positions to this grid so cut
 /// segments from adjacent triangles share canonical vertex ids even on non-watertight input).
-const WELD: f32 = 1.0e-4;
+///
+/// `pub(crate)` so [`crate::audit`] can derive its validation tolerance *from* it rather than pick a
+/// second one. An audit that welded on a different lattice than the cap assembly used would be asking
+/// about a different mesh: finer, and the cap↔skin seam reads as open purely from the mismatch;
+/// coarser, and it closes seams the slicer left open.
+pub(crate) const WELD: f32 = 1.0e-4;
 
 /// The crate's only random source: a 32-bit integer hash mapped into `[0, 1)`.
 ///

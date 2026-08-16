@@ -1,10 +1,12 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+mod audit;
 mod bake;
 mod mesh;
 mod soup;
 
+pub use audit::{FragmentAudit, audit_fragment, audit_fragments};
 pub use bake::{DetachedChunk, DetachedPart, Fragment, FractureCache, FractureSubject, bake_fractures};
 pub use mesh::{FragmentGeometry, fracture_mesh};
 pub use soup::hash_f32;
