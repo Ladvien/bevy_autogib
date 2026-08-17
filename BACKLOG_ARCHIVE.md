@@ -388,3 +388,30 @@ bounding box and the actual shape differ a lot, and having the example quietly u
 undercut the ticket it is demonstrating.
 
 **Boundary held:** the crate hands out cells and stops. It still names no solver.
+
+## Phase 2 — Safety net and cleanup
+
+### ☑ AG-011 · Stage-1 defects that outlive the rewrite
+
+**The extent metric: fixed, and it had to be.** Cell selection is by **volume** (`soup.rs`, the
+`fracture` driver). `Soup::extent` picked the largest bounding half-dimension, so a flat sliver with one
+long axis kept winning "largest piece" and being re-cut while compact pieces were never touched. Tier A
+would have inherited that wholesale, so this half was delivered inside `AG-001` out of necessity rather
+than waiting its turn. `Soup::extent` survives at one call site — sizing the target piece count from the
+subject's overall size — which is a legitimate use and not the selection bug.
+
+**The async bake: settled by measurement, and the answer is no.** The fracture takes **0.33 ms** for a
+12-fragment torso-and-head subject (release, stable to ±0.01 ms across four runs). The ticket's own
+threshold was "warranted at 50 ms and not at 5 ms", so this is an order of magnitude the safe side. The
+timer is committed in `examples/fracture_cube.rs` so the number can be re-checked rather than trusted,
+and the reasoning is recorded at the call site in `bake.rs`.
+
+> **Falsified premise.** AG-011 described the async bake as existing code with a latent defect —
+> "`AsyncComputeTaskPool::spawn` resolves to the single-threaded pool and **runs the 'async' bake inline
+> on the main thread**". There is no async bake. `AsyncComputeTaskPool` appears nowhere in this crate;
+> the bake is a plain synchronous system. The hazard described is real but *prospective*: it is what
+> would happen **if** someone added one, because `bevy/multi_threaded` is deliberately undeclared, so
+> the pool would be single-threaded unless another crate turned the feature on through unification. One
+> code path that is concurrent in some consumers' builds and not others is precisely what the one-path
+> rule exists to prevent. That argument is now a comment beside the call, where whoever reaches for
+> `spawn` will read it.

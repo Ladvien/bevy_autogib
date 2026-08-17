@@ -56,7 +56,11 @@ fn main() {
     ];
 
     let seed = 0x00C0_FFEE;
+    // **Timed, because `AG-011` asked whether the bake needs to move off the main thread and the honest
+    // answer is a number rather than an opinion.** A fix is warranted at 50 ms and not at 5 ms.
+    let started = std::time::Instant::now();
     let pieces: Vec<FragmentGeometry> = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, seed, None);
+    let elapsed = started.elapsed();
 
     println!();
     println!("bevy_autogib — a two-part solid, plane-cut into at most {TARGET} pieces (seed {seed:#010x})");
@@ -101,6 +105,7 @@ fn main() {
     // cap and still have lost a second loop that never closed.
     let capped = pieces.iter().filter(|p| p.cap.is_some()).count();
     println!("  {capped} of {} fragments carry at least one closed cut face.", pieces.len());
+    println!("  the fracture itself took {:.2} ms.", elapsed.as_secs_f64() * 1000.0);
     println!();
 
     // **Two artefacts, two headings, and they must never be added together.** A fragment is a closed

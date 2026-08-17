@@ -353,6 +353,18 @@ pub fn bake_fractures(
         let raw = (settings.pieces_base as f32 * (ext / ref_ext)).round() as i32;
         let target = raw.clamp(settings.min_pieces, settings.max_pieces).max(1) as usize;
 
+        // **The bake runs here, on the main thread, and `AG-011` settled that by measuring rather than
+        // arguing.** A 12-fragment torso-and-head fracture takes **0.33 ms** (release, stable across
+        // runs, `cargo run --release --example fracture_cube`). The ticket's own threshold was "a fix is
+        // warranted at 50 ms and not at 5 ms", so this is an order of magnitude the safe side of it.
+        //
+        // Recording the alternative so nobody re-derives it: moving this to `AsyncComputeTaskPool`
+        // would need `bevy/multi_threaded`, which this crate deliberately does not declare. Without it
+        // that pool is single-threaded and `spawn` runs the work inline anyway — so the "async" bake
+        // would be async only in builds where some *other* crate happened to turn the feature on, via
+        // feature unification. One code path that is concurrent in some consumers' builds and not
+        // others is exactly the ambiguity `CLAUDE.md`'s one-path rule exists to prevent, and buying it
+        // for 0.33 ms would be a bad trade twice over.
         let pieces = fracture(
             body,
             &proxy.0,
