@@ -131,3 +131,36 @@ exactly `2 × bore`, which is also the mechanism stated in one line.
 **Ticket amended:** the un-recentred volume assertion is kept *as the falsified half*, with a comment
 saying that if it ever fails, the prediction may have become true and the comment is what needs
 revisiting. AG-008 flips the rest.
+
+### ☑ AG-006 · Scope the fan-fold claim, and commit the fixture that breaks it
+
+`known_defect_a_doubly_wound_fan_folds_with_every_counter_at_zero` commits a regular pentagram `{5/2}`
+and feeds its five segments straight to `cap_side`. The fan covers the inner pentagon twice, so emitted
+area exceeds the star's true area by exactly the inner pentagon's area — and
+`inconsistently_oriented_edges`, `non_manifold_edges` and `non_manifold_vertices` are **all zero**. All
+figures are written as formulas from the unit circumradius, so they can be re-derived rather than trusted.
+
+The equivalence is restated as scoped in both places it was asserted: the doc comment on
+`known_defect_cap_fan_folds_on_a_non_convex_section`, and `docs/isomesh-upstream-asks.md` §5 — where it
+had been offered *upstream* in the unqualified form, which is the version that mattered most to fix.
+
+**The two qualifiers, stated the way the ticket asked:**
+
+1. It is specific to `push_cap_tri`'s **per-triangle** flip. That flip is what converts mixed signed area
+   into a shared spoke traversed twice the same way; it is a fact about our capper, not a property of
+   `MeshReport`.
+2. **The loop has to reverse.** An apex outside a *simply-connected* loop mixes the signs — the `u_prism`
+   case. A loop winding twice around its centroid in the same direction mixes nothing.
+
+> **Consequence that runs the other way from the ticket's framing.** AG-006 was written as a narrowing —
+> "the claim is weaker than we said". It is, but the conclusion is that **Ask 5 is worth *more* than the
+> asks doc implied**, not less: the topological route cannot see a doubly-wound fold, and a narrow-phase
+> check inside a fan is the only thing that can. The summary table is corrected to say so.
+
+> **Falsified premise, carried in from the ticket's own side-note.** It claimed `assemble_loops`
+> "returns loops whose first vertex is duplicated at the end", double-weighting the fan apex. It does
+> not: `loop_v` starts as `vec![s0, s1]` and the walk breaks on `cur == s0` *before* pushing again, so
+> every vertex appears exactly once — which is also why `cap_side` closes the fan with `lp[(k + 1) % n]`.
+> A duplicated first vertex would make that modulo wrap emit a degenerate final triangle. The other half
+> of the note is true and is now recorded in the doc comment: the apex is a plain vertex average, not an
+> area centroid.

@@ -128,16 +128,34 @@ records that the counter is blind to folds inside a Steiner fan.
 An opt-in mode that tests vertex-adjacent (but not edge-adjacent) pairs would serve both.
 
 **Not blocked without it.** autogib found its fan fold by another route, and that route is worth
-passing back upstream because it is cheaper and exact:
+passing back upstream — but **it is a sufficient condition, not an equivalence**, and an earlier
+revision of this document offered it as one. Scoped correctly:
 
-> A fan whose apex lies outside the loop produces triangles of mixed signed area. `push_cap_tri`
-> flips winding per triangle to face outward, so a folded triangle and its neighbour end up traversing
-> their shared spoke edge in the *same* direction — which is exactly `inconsistently_oriented_edges`.
-> Fold ⟺ mixed signs ⟺ `inconsistently_oriented_edges > 0`, given the mesh is welded first.
+> A fan whose apex lies outside a **simply-connected** loop produces triangles of mixed signed area.
+> `push_cap_tri` flips winding **per triangle** to face outward, so a folded triangle and its neighbour
+> end up traversing their shared spoke edge in the *same* direction — which is exactly
+> `inconsistently_oriented_edges`. Given a per-triangle flip and a welded mesh:
+> mixed signs ⇒ `inconsistently_oriented_edges > 0`.
 
-So `MeshReport` already detects fan folds topologically, tolerance-free, with no narrow phase — as long
-as the caller welds before validating. That is worth a line in the `validate` docs regardless of
-whether ask 5 is ever built.
+**Two qualifiers, both measured rather than reasoned:**
+
+1. **The per-triangle flip is the mechanism, not an incidental detail.** It is what converts mixed
+   signed area into a shared spoke traversed twice the same way. A capper that wound its fan
+   consistently and assigned normals some other way would fold without ever moving the counter — so
+   this is a fact about `push_cap_tri`, not a general property of `MeshReport`.
+
+2. **The loop has to reverse, and it need not.** A closed path that winds around its own centroid
+   **twice in the same direction** has no mixed signs at all: every fan triangle agrees, the surface is
+   consistently oriented, and the fan still folds. A pentagram `{5/2}` is the minimal witness — fanned
+   from its centre it covers the inner pentagon twice, so emitted area exceeds the star's true area by
+   exactly the inner pentagon's area, while `inconsistently_oriented_edges`, `non_manifold_edges` and
+   `non_manifold_vertices` are **all zero**. autogib commits it as
+   `known_defect_a_doubly_wound_fan_folds_with_every_counter_at_zero`.
+
+So `MeshReport` detects *one common class* of fan fold topologically, tolerance-free and with no narrow
+phase, as long as the caller welds first. That is worth a line in the `validate` docs. **It also means
+ask 5 is worth more to us than this document previously implied**, not less: the topological route
+cannot see a doubly-wound fold, and a narrow-phase check inside a fan is the only thing that can.
 
 ---
 
@@ -149,4 +167,4 @@ whether ask 5 is ever built.
 | 2 — mesh field (grid distance × GWN sign), **split from the `S-001→S-006→S-007` chain** | L | the SDF backend — the only hard blocker |
 | 3 — attribute-aware weld | M | nothing, but every hard-edged consumer hits it |
 | 4 — convex decomposition | L | nothing; it is the collider *answer*, not a dependency |
-| 5 — self-intersection inside a fan | S | nothing; autogib has a cheaper exact route, described above |
+| 5 — self-intersection inside a fan | S | nothing, but the cheaper topological route above is **sufficient, not necessary** — it cannot see a doubly-wound fold |

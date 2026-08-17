@@ -296,7 +296,7 @@ pub fn audit_fragments(frags: &[FragmentGeometry]) -> Vec<FragmentAudit> {
 mod tests {
     use super::*;
     use crate::mesh::{fracture_mesh, geometry_from_soup};
-    use crate::soup::{Plane, Soup, split_soup};
+    use crate::soup::{Plane, Soup, cap_side, split_soup};
     use bevy::math::{Mat4, Vec3, primitives::Cuboid};
     use isomesh::validate::check_determinism;
 
@@ -411,6 +411,26 @@ mod tests {
     }
 
 
+    /// The five segments of a regular pentagram `{5/2}`, unit circumradius, in the plane `z = 0`.
+    ///
+    /// **The counterexample to "fold ⟺ inconsistent orientation".** A pentagram is drawn by joining
+    /// every *second* vertex of a regular pentagon, so the closed path winds around the centre
+    /// **twice, without ever reversing**. Fan it from its centroid and all five triangles carry the
+    /// same signed area — so `push_cap_tri`'s per-triangle flip has nothing to disagree about, every
+    /// shared spoke is traversed oppositely by its two triangles, and the surface is *consistently
+    /// oriented*. The fan still folds: it covers the inner pentagon twice.
+    ///
+    /// Each segment's endpoints are distinct pentagon vertices and the crossings are not vertices, so
+    /// every vertex has degree 2 and `assemble_loops` recovers one loop with no ambiguity to resolve.
+    fn pentagram_segments() -> Vec<[Vec3; 2]> {
+        let vertex = |i: usize| {
+            let a = std::f32::consts::TAU * (i as f32) / 5.0;
+            Vec3::new(a.cos(), a.sin(), 0.0)
+        };
+        // 0 → 2 → 4 → 1 → 3 → 0: step two vertices at a time, which is what `{5/2}` means.
+        (0..5).map(|k| [vertex((2 * k) % 5), vertex((2 * (k + 1)) % 5)]).collect()
+    }
+
     /// Signed volume of a soup's triangles **as they sit**, with no recentring — the same
     /// `(1/6)·Σ (a × b)·c` the audit uses.
     ///
@@ -460,6 +480,75 @@ mod tests {
         ];
         // `extent` is the merged solid's largest bounding half-dimension; `MIN_FRACTION` is 0.15.
         fracture_mesh(&placed, 12, 0.67 * 0.15, 0x00C0_FFEE, None)
+    }
+
+    /// **AG-006 — a fan can fold with both counters reading zero.**
+    ///
+    /// `docs/isomesh-upstream-asks.md` §5 offered upstream a cheap exact fold detector:
+    ///
+    /// > Fold ⟺ mixed signs ⟺ `inconsistently_oriented_edges > 0`, given the mesh is welded first.
+    ///
+    /// **That equivalence needs two qualifiers, and this test is the one that supplies the second.**
+    ///
+    /// 1. It holds only for fans built with [`crate::soup::push_cap_tri`]'s per-triangle flip. The flip
+    ///    is what converts "mixed signed area" into "two triangles traverse their shared spoke the same
+    ///    way". A capper that wound its fan consistently and set normals some other way would fold
+    ///    without ever tripping the counter.
+    /// 2. **It requires the loop to reverse.** A fan apex *outside* a simply-connected loop puts some
+    ///    triangles on each side, so the signs are mixed — that is the `u_prism` case. A loop that winds
+    ///    around its own centroid **twice in the same direction** has no mixed signs at all: every
+    ///    triangle agrees, the surface is consistently oriented, and the fan folds anyway.
+    ///
+    /// A pentagram is the minimal witness. Fanned from its centre it covers the inner pentagon twice,
+    /// so the emitted area exceeds the star's true area **by exactly the inner pentagon's area** — and
+    /// `inconsistently_oriented_edges`, `non_manifold_edges` and `non_manifold_vertices` are all zero.
+    ///
+    /// The consequence for the ask is not that the detector is useless — it is that it is a *sufficient*
+    /// condition for a fold and not a necessary one, so §5 (self-intersection inside a fan) is worth
+    /// more to us than the ask says, not less.
+    #[test]
+    fn known_defect_a_doubly_wound_fan_folds_with_every_counter_at_zero() {
+        // Analytic, from the unit circumradius — written as formulas so they can be re-derived.
+        let r: f32 = 1.0;
+        // Five triangles from the centre, each spanning two pentagon steps: 2·(2π/5) = 4π/5.
+        let fan_area = 5.0 * 0.5 * r * r * (4.0 * std::f32::consts::PI / 5.0).sin();
+        // The inner pentagon's circumradius is R/φ², and it is the region the fan covers twice.
+        let phi = (1.0 + 5.0f32.sqrt()) / 2.0;
+        let inner_r = r / (phi * phi);
+        let inner_pentagon = 2.5 * inner_r * inner_r * (2.0 * std::f32::consts::PI / 5.0).sin();
+        let true_star_area = fan_area - inner_pentagon;
+
+        let mut cap = Soup::default();
+        cap_side(
+            &pentagram_segments(),
+            &Plane { point: Vec3::ZERO, normal: Vec3::Z },
+            Vec3::Z,
+            &mut cap,
+        );
+        assert!(!cap.is_empty(), "the pentagram loop produced no cap at all");
+
+        let area = cap_area(&cap);
+        assert!(
+            (area - fan_area).abs() < 1.0e-3,
+            "the fan emitted {area}, expected {fan_area}. The star's true area is {true_star_area}; the \
+             excess {} is exactly the inner pentagon, covered a second time. If the capper was fixed, \
+             change this to `assert!((area - {true_star_area}).abs() < 1e-3)`.",
+            fan_area - true_star_area
+        );
+        assert!(
+            area > true_star_area + 1.0e-3,
+            "the fan no longer overshoots the pentagram — the fold is gone, so flip this test"
+        );
+
+        // The point of the whole ticket: the fold is real and every counter says the mesh is fine.
+        let g = geometry_from_soup(&cap).expect("the cap draws something");
+        let a = audit_fragment(&g).expect("the cap can be audited");
+        let note = "AG-006: a doubly-wound fan folds *without* mixed signs, so this counter cannot see \
+                    it. If this fires, the equivalence in docs/isomesh-upstream-asks.md §5 may have \
+                    become true and that document needs revisiting, not just this number.";
+        assert_eq!(a.inconsistently_oriented_edges, 0, "{note} Audit: {a:?}");
+        assert_eq!(a.non_manifold_edges, 0, "{note} Audit: {a:?}");
+        assert_eq!(a.non_manifold_vertices, 0, "{note} Audit: {a:?}");
     }
 
     /// **AG-002 — a cut through a hollow fills the bore. Asserts the bug is still here.**
@@ -684,6 +773,33 @@ mod tests {
     /// turned to face `outward` individually. It cannot hide from an *edge orientation* check: two
     /// neighbouring fan triangles share the spoke `centroid→p`, and flipping exactly one of them makes
     /// both traverse that spoke the same way, which is precisely `inconsistently_oriented_edges`.
+    ///
+    /// # That detector is sufficient, not necessary — scope it before quoting it
+    ///
+    /// It is tempting to read the paragraph above as *fold ⟺ `inconsistently_oriented_edges > 0`*, and
+    /// `docs/isomesh-upstream-asks.md` §5 did offer it upstream in that form. **Two qualifiers, both
+    /// load-bearing:**
+    ///
+    /// 1. It is specific to `push_cap_tri`'s **per-triangle** flip. That flip is the mechanism turning
+    ///    mixed signed area into a shared spoke traversed twice the same way. A capper that wound its
+    ///    fan consistently would fold without tripping the counter.
+    /// 2. **It needs the loop to reverse.** This fixture's apex falls outside a simply-connected loop,
+    ///    which puts triangles on both sides and mixes the signs. A loop that winds around its centroid
+    ///    *twice in the same direction* mixes nothing — see
+    ///    `known_defect_a_doubly_wound_fan_folds_with_every_counter_at_zero`, where a pentagram folds
+    ///    with every counter at zero.
+    ///
+    /// # A related observation, and the half of it that turned out to be false
+    ///
+    /// `cap_side`'s apex is a plain **vertex average, not an area centroid**, so it is already pulled
+    /// toward whichever part of the loop carries the most vertices rather than the most area. That is
+    /// true, and it is not worth fixing, because AG-001 removes non-convex sections entirely.
+    ///
+    /// The backlog paired that with a claim that `assemble_loops` duplicates each loop's first vertex
+    /// at the end, double-weighting it. **It does not.** `loop_v` starts as `vec![s0, s1]` and the walk
+    /// breaks on `cur == s0` *before* pushing it again, so every vertex appears exactly once — which is
+    /// also why `cap_side` closes the fan with `lp[(k + 1) % n]`. A duplicated first vertex would make
+    /// that modulo wrap emit a degenerate final triangle.
     ///
     /// **This test asserts the bug is still here.** When the cap triangulation is fixed, it fails —
     /// that is the design. Flip both assertions to their correct form (`== 0`, and area equal to
