@@ -32,21 +32,11 @@
 //!
 //! Run: `cargo run --release --example capture -- --out frames`
 
-use bevy::{
-    app::SubApps,
-    asset::RenderAssetUsages,
-    camera::RenderTarget,
-    prelude::*,
-    render::{
-        RenderPlugin,
-        render_resource::{Extent3d, PollType, TextureDimension, TextureFormat, TextureUsages},
-        renderer::RenderDevice,
-        view::screenshot::{Screenshot, save_to_disk},
-    },
-    window::ExitCondition,
-    winit::WinitPlugin,
-};
+use bevy::prelude::*;
 use bevy_autogib::{CutSettings, FragmentGeometry, ProxyCell, audit_proxy, fracture_mesh, hash_f32};
+
+mod common;
+use common::{Recorder, arg, light_and_floor, material};
 
 /// Capture size. Small enough that 100 PNGs and the GIF built from them stay a reasonable thing to
 /// commit; large enough to see a cut face.
@@ -143,109 +133,44 @@ impl Verdict {
 }
 
 fn main() {
-    let out = out_dir();
-    if let Err(e) = std::fs::create_dir_all(&out) {
-        error!("capture: cannot create {out}: {e}");
-        return;
-    }
+    let out = arg("--out").unwrap_or_else(|| "frames".to_string());
+    let tint = match arg("--tint").as_deref() {
+        Some("demo") => Tint::Demo,
+        Some("audit") | None => Tint::Audit,
+        Some(other) => {
+            error!("capture: unknown --tint {other:?}; use `audit` or `demo`");
+            return;
+        }
+    };
 
-    let mut app = headless_app();
-    let target = new_render_target(&mut app);
-    spawn_camera(&mut app, target.clone());
+    let camera = Transform::from_xyz(3.4, 2.2, 4.6).looking_at(Vec3::new(0.0, 0.9, 0.0), Vec3::Y);
+    let Some(mut rec) = Recorder::new(WIDTH, HEIGHT, camera, &out) else { return };
+    light_and_floor(rec.world());
+    spawn_intact(rec.world());
+    rec.warm_up(4);
 
-    let total = INTACT_FRAMES + BROKEN_FRAMES;
-    for frame in 0..total {
+    for frame in 0..INTACT_FRAMES + BROKEN_FRAMES {
         if frame == INTACT_FRAMES {
-            break_it(&mut app);
+            break_it(&mut rec, tint);
         }
-        screenshot(&mut app, &target, &out, frame);
-        update(&mut app);
+        rec.shoot();
     }
-    // Screenshots read back on the GPU a frame or two behind, so pump past the last one.
-    for _ in 0..4 {
-        update(&mut app);
-    }
-    info!("capture: wrote {total} frames to {out}");
+    let n = rec.finish();
+    info!("capture: wrote {n} frames to {out}");
 }
 
-/// `--out <dir>`, defaulting to `frames`. Deliberately hand-parsed: a CLI crate has no business in
-/// this repo's dependency graph, not even as a dev-dependency, when the whole need is one flag.
-fn out_dir() -> String {
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        if a == "--out" {
-            match args.next() {
-                Some(dir) => return dir,
-                // Malformed input is warned and skipped, never silently substituted — the same rule
-                // the crate applies to a mesh with no positions.
-                None => {
-                    warn!("capture: --out given with no directory; falling back to the default");
-                    break;
-                }
-            }
-        }
-    }
-    "frames".to_string()
-}
-
-/// `DefaultPlugins` with no window and no winit, so nothing is mapped and we own the update loop.
-fn headless_app() -> SubApps {
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                ..default()
-            })
-            // Every shader must be ready before the first frame, or frame 0 renders empty.
-            .set(RenderPlugin { synchronous_pipeline_compilation: true, ..default() })
-            .disable::<WinitPlugin>(),
-    )
-    .add_systems(Startup, setup_scene);
-
-    // `run()` is never called, so the two things the runner would have done must be done here.
-    app.finish();
-    app.cleanup();
-    std::mem::take(app.sub_apps_mut())
-}
-
-fn new_render_target(app: &mut SubApps) -> Handle<Image> {
-    let mut target = Image::new_uninit(
-        Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    target.texture_descriptor.usage |= TextureUsages::RENDER_ATTACHMENT;
-    app.main.world_mut().resource_mut::<Assets<Image>>().add(target)
-}
-
-fn spawn_camera(app: &mut SubApps, target: Handle<Image>) {
-    app.main.world_mut().spawn((
-        Camera3d::default(),
-        RenderTarget::from(target),
-        // The same framing as `explode`, so the two are comparable side by side.
-        Transform::from_xyz(3.4, 2.2, 4.6).looking_at(Vec3::new(0.0, 0.9, 0.0), Vec3::Y),
-    ));
-}
-
-/// One world update, then block until the GPU has actually finished the frame — without the wait, a
-/// screenshot can read back a half-drawn target.
-fn update(app: &mut SubApps) {
-    app.update();
-    let device = app.main.world().resource::<RenderDevice>().wgpu_device().clone();
-    if let Err(e) = device.poll(PollType::Wait { submission_index: None, timeout: None }) {
-        warn!("capture: device poll failed, frame may be torn: {e:?}");
-    }
-}
-
-fn screenshot(app: &mut SubApps, target: &Handle<Image>, out: &str, frame: u32) {
-    let path = format!("{out}/frame{frame:04}.png");
-    app.main
-        .world_mut()
-        .spawn(Screenshot::image(target.clone()))
-        .observe(save_to_disk(path));
+/// How a fragment's outer skin is coloured — **the one thing this recorder varies.**
+///
+/// The two are different questions about the same frames. [`Tint::Audit`] asks *is every piece a
+/// solid*, which is a measurement and belongs in a regression GIF. [`Tint::Demo`] asks *does this
+/// read as broken*, which is what the README is showing off and depends entirely on the skin/interior
+/// contrast. Rendering both from one recorder is what keeps them the same motion.
+#[derive(Clone, Copy, PartialEq)]
+enum Tint {
+    /// Green / amber / magenta by [`audit_proxy`]'s verdict.
+    Audit,
+    /// The subject's own skin, as `explode.rs` shows it.
+    Demo,
 }
 
 /// The two shells the subject is made of — a torso and a head, the honest non-manifold case.
@@ -256,33 +181,14 @@ fn subject() -> [(Mesh, Mat4); 2] {
     ]
 }
 
-fn setup_scene(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.spawn((
-        DirectionalLight { illuminance: 9_000.0, shadow_maps_enabled: true, ..default() },
-        Transform::from_xyz(4.0, 8.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-    commands.spawn((
-        Mesh3d(meshes.add(Mesh::from(Plane3d::default().mesh().size(14.0, 14.0)))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.16, 0.16, 0.18),
-            perceptual_roughness: 0.95,
-            ..default()
-        })),
-    ));
-    // The intact subject wears the neutral skin — it has no verdict, because it has not been cut.
-    let skin = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.30, 0.42, 0.52),
-        perceptual_roughness: 0.85,
-        ..default()
-    });
+/// The intact subject wears the neutral skin — it has no verdict, because it has not been cut.
+fn spawn_intact(world: &mut World) {
+    let skin = material(world, Color::srgb(0.30, 0.42, 0.52), 0.85);
     for (mesh, xform) in subject() {
-        commands.spawn((
+        let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
+        world.spawn((
             Intact,
-            Mesh3d(meshes.add(mesh)),
+            Mesh3d(mesh),
             MeshMaterial3d(skin.clone()),
             Transform::from_matrix(Mat4::from_translation(ORIGIN) * xform),
         ));
@@ -290,8 +196,8 @@ fn setup_scene(
 }
 
 /// Despawn the intact subject, fracture it, and spawn every piece tinted by its audit verdict.
-fn break_it(app: &mut SubApps) {
-    let world = app.main.world_mut();
+fn break_it(rec: &mut Recorder, tint: Tint) {
+    let world = rec.world();
 
     let intact: Vec<Entity> = world.query_filtered::<Entity, With<Intact>>().iter(world).collect();
     for e in intact {
@@ -313,22 +219,20 @@ fn break_it(app: &mut SubApps) {
         info!("capture: {n:>2} of {} fragments — {}", pieces.len(), v.label());
     }
 
-    let interior = world.resource_mut::<Assets<StandardMaterial>>().add(StandardMaterial {
-        base_color: Color::srgb(0.30, 0.05, 0.05),
-        perceptual_roughness: 0.55,
-        ..default()
-    });
-    // One material per verdict, made once rather than per fragment.
+    // The cut faces keep the raw interior whichever tint is in play: that contrast is what makes a
+    // break read as a break, and losing it would make both GIFs worse for no gain.
+    let interior = material(world, Color::srgb(0.30, 0.05, 0.05), 0.55);
+    // One material per verdict, made once rather than per fragment. Under `Tint::Demo` all three
+    // are the subject's own skin, so the verdict lookup below stays one code path either way.
     let skins: Vec<(Verdict, Handle<StandardMaterial>)> =
         [Verdict::Solid, Verdict::ClosedNonManifold, Verdict::Open]
             .into_iter()
             .map(|v| {
-                let h = world.resource_mut::<Assets<StandardMaterial>>().add(StandardMaterial {
-                    base_color: v.color(),
-                    perceptual_roughness: 0.85,
-                    ..default()
-                });
-                (v, h)
+                let color = match tint {
+                    Tint::Audit => v.color(),
+                    Tint::Demo => Color::srgb(0.30, 0.42, 0.52),
+                };
+                (v, material(world, color, 0.85))
             })
             .collect();
 
@@ -360,7 +264,7 @@ fn break_it(app: &mut SubApps) {
     }
 
     // The integrator is added here rather than at startup so the intact frames are perfectly still.
-    app.main.add_systems(Update, integrate);
+    rec.app().main.add_systems(Update, integrate);
 }
 
 /// Deterministic per-fragment launch, from the crate's own frozen hash — no RNG dependency.

@@ -4,7 +4,13 @@
 
 Runtime mesh fracture: take whatever meshes an entity actually loaded, recursively plane-cut them into watertight-capped chunks, bake that once per source asset, and swap the pieces in when the thing dies.
 
-![A blue two-part solid standing intact, then bursting into tumbling fragments whose cut faces are raw red while their outer surfaces stay blue](docs/explode.gif)
+![A blue two-part figure standing; a projectile takes the top off its head, another takes a piece off its shoulder, a slash cleaves its chest, a blade sweeps through its middle and a blast scatters what is left — the raw red interior showing on every cut face](docs/sever.gif)
+
+That is `examples/sever.rs`, recorded headless. The subject stays standing between blows and what comes off depends on where you hit it — a projectile takes a chunk, a blade cleaves, a blast finishes it. **[See all four examples →](docs/DEMOS.md)**
+
+The other half is the whole-subject burst, which is the shape a death actually wants:
+
+![The same figure standing intact, then bursting into tumbling fragments whose cut faces are raw red while their outer surfaces stay blue](docs/explode.gif)
 
 That is `examples/explode.rs`, unmodified and at its own 0.4× playback. The subject is intact, then it is its own fragments — the "break" is one despawn and a spawn, because the fracture was computed long before. **The red is not a colour choice, it is the whole idea:** every fragment comes back as two meshes, the subject's original surface and the faces this cut just created, so you can give the inside a different material. Render both with the skin material and the same fragments stop looking broken and start looking disassembled.
 
@@ -202,10 +208,12 @@ Note what this does *not* claim. Fragment geometry is `f32` arithmetic, so cross
 
 ## Examples
 
+**[docs/DEMOS.md](docs/DEMOS.md) has all four with recordings**, what each is for, and how to regenerate the clips.
+
 ```sh
-cargo run -p bevy_autogib --example fracture_cube   # terminal only — no window, no GPU
-cargo run -p bevy_autogib --example sever           # needs a GPU
-cargo run -p bevy_autogib --example explode         # needs a GPU
+cargo run --release --example fracture_cube   # terminal only — no window, no GPU
+cargo run --release --example sever           # needs a GPU
+cargo run --release --example explode         # needs a GPU
 ```
 
 `sever` is the one to look at if you came here for gameplay-driven fracture. The subject stays standing and you take pieces off it: aim with the arrow keys, then `1`–`5` for a projectile, a slash, a swept blade, a blast or a pull; `G` cycles which frontier of the same bake is standing, `R` resets. Hit it again and it comes apart further.
