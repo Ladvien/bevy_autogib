@@ -10,6 +10,7 @@ use bevy::asset::AssetPath;
 use bevy::prelude::*;
 
 use crate::FractureSettings;
+use crate::bond::BondGraph;
 use crate::mesh::{append_mesh, geometry_from_piece, geometry_from_soup};
 use crate::proxy::ProxyCell;
 use crate::soup::{Soup, fracture};
@@ -78,6 +79,7 @@ pub struct DetachedChunk {
 pub struct FractureCache {
     body: HashMap<AssetId<WorldAsset>, Vec<Fragment>>,
     trees: HashMap<AssetId<WorldAsset>, FragmentTree>,
+    graphs: HashMap<AssetId<WorldAsset>, BondGraph>,
     detached: HashMap<AssetId<WorldAsset>, DetachedChunk>,
     baked: HashSet<AssetId<WorldAsset>>,
 }
@@ -98,6 +100,15 @@ impl FractureCache {
     /// queries that read one bake at any granularity from the proxy cells up to the finest cut.
     pub fn tree(&self, source: AssetId<WorldAsset>) -> Option<&FragmentTree> {
         self.trees.get(&source)
+    }
+
+    /// Which of a source's finest fragments **touch** which, over how much shared face.
+    ///
+    /// Nesting and neighbouring are different questions: [`tree`](Self::tree) answers the first and
+    /// this answers the second. Pair it with a [`BondSet`](crate::BondSet) the caller owns and
+    /// [`BondGraph::islands`] to take one piece off and leave the rest standing.
+    pub fn bonds(&self, source: AssetId<WorldAsset>) -> Option<&BondGraph> {
+        self.graphs.get(&source)
     }
 
     /// The finest granularity — every fragment that was never cut further. **This is the set the
@@ -430,19 +441,23 @@ pub fn bake_fractures(
             settings.max_depth,
             seed_from_path(&asset_path),
         );
+        let graph = crate::mesh::bond_graph(&pieces, &tree);
         let frags: Vec<Fragment> = pieces
             .into_iter()
             .enumerate()
             .map(|(i, piece)| build_fragment(FragmentId(i as u32), piece, &mut meshes))
             .collect();
         info!(
-            "autogib: baked {} fragments for {asset_path} ({} in the finest frontier, {} cuts)",
+            "autogib: baked {} fragments for {asset_path} ({} in the finest frontier, {} cuts, \
+             {} bonds)",
             frags.len(),
             tree.leaves().len(),
-            tree.cuts()
+            tree.cuts(),
+            graph.len()
         );
         cache.body.insert(source, frags);
         cache.trees.insert(source, tree);
+        cache.graphs.insert(source, graph);
 
         // The detached chunk (single intact piece, keeps its own material).
         if let Some(chunk) = bake_detached(&part, part_material, &mut meshes) {

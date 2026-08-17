@@ -226,9 +226,27 @@ impl ProxyCell {
         v6 / 6.0
     }
 
+    /// How many faces this cell has.
+    pub(crate) fn face_count(&self) -> usize {
+        self.faces.len()
+    }
+
+    /// Face `fi` as its ring of points, wound counter-clockwise seen from outside. Empty for an
+    /// out-of-range index — refused, not a panicking index.
+    pub(crate) fn face_ring(&self, fi: usize) -> Vec<Vec3> {
+        let Some(f) = self.faces.get(fi) else { return Vec::new() };
+        f.iter().filter_map(|&i| self.verts.get(i as usize).copied()).collect()
+    }
+
     /// Outward plane of one face, by Newell's method — stable for a polygon of any size, where a
     /// single cross product of the first three vertices is not.
-    fn face_plane(&self, fi: usize) -> Option<(Vec3, Vec3)> {
+    ///
+    /// `pub(crate)` so [`crate::bond`] can match coplanar faces between neighbouring cells; the
+    /// returned pair is `(a point on the plane, the outward unit normal)`.
+    pub(crate) fn face_plane(&self, fi: usize) -> Option<(Vec3, Vec3)> {
+        if fi >= self.faces.len() {
+            return None;
+        }
         let f = &self.faces[fi];
         let mut n = Vec3::ZERO;
         for i in 0..f.len() {

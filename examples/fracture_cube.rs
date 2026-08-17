@@ -16,7 +16,7 @@
 
 use bevy::math::{Mat4, Vec3, primitives::Cuboid};
 use bevy::mesh::Mesh;
-use bevy_autogib::{FragmentGeometry, ProxyCell, fracture_mesh};
+use bevy_autogib::{BondSet, FragmentGeometry, ProxyCell, fracture_mesh};
 
 /// Target fragment count. The ECS bake derives this from the mesh's bounding size and the
 /// `FractureSettings` dials; here it is spelled out so one number can be varied at a time.
@@ -77,6 +77,31 @@ fn main() {
             f.len()
         );
     }
+
+    // **Which fragments touch which.** The hierarchy says what nests; this says what neighbours,
+    // and only the second lets one piece come off while the rest stays standing.
+    let leaves = baked.tree.leaves();
+    let graph = &baked.bonds;
+    let intact = BondSet::new(graph);
+    println!();
+    println!("  adjacency — {} bonds over {} finest fragments", graph.len(), leaves.len());
+    println!("    intact, that is {} island(s)", graph.islands(&leaves, &intact).len());
+    if let Some(victim) = leaves.iter().min_by_key(|&&id| graph.incident(id).len()) {
+        let mut broken = BondSet::new(graph);
+        broken.sever_all(graph.incident(*victim));
+        let islands = graph.islands(&leaves, &broken);
+        println!(
+            "    severing fragment {}'s {} bond(s) leaves {} island(s) of sizes {:?}",
+            victim.0,
+            broken.severed(),
+            islands.len(),
+            islands.iter().map(|i| i.len()).collect::<Vec<_>>()
+        );
+    }
+    println!("    (this subject comes back as one island because the head cell's underside sits");
+    println!("     exactly on the torso cell's top face at y = 0.5 — coplanar, so a real bond. Cells");
+    println!("     that merely interpenetrate or abut without agreeing on a face get NO bond, and");
+    println!("     that refusal is deliberate: a proximity guess would weld a head to a torso.)");
 
     let pieces: Vec<FragmentGeometry> = baked.into_leaves();
 

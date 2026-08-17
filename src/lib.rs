@@ -3,12 +3,14 @@
 
 mod audit;
 mod bake;
+mod bond;
 mod mesh;
 mod proxy;
 mod soup;
 mod tree;
 
 pub use audit::{SolidAudit, SurfaceReport, audit_proxies, audit_proxy, audit_render};
+pub use bond::{Bond, BondGraph, BondId, BondSet};
 pub use bake::{
     DetachedChunk, DetachedPart, Fragment, FractureCache, FractureProxy, FractureSubject,
     bake_fractures,

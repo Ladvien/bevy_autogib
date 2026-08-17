@@ -105,6 +105,25 @@ cache.tree(id)                // the topology itself: parents, children, depths
 
 Frontiers may be **mixed-depth** — that is the point, and it is what a localised break-off needs: the struck arm resolves to its finest pieces while the torso stays a single chunk.
 
+## Which fragments touch which
+
+Nesting and neighbouring are different questions. `BondGraph` answers the second: for each pair of fragments that share a face, where that face is, which way it points, and how large it is. That is what lets one piece come off while the rest stays standing.
+
+The match is **exact**, by Müller's coplanar-face algorithm — sort every face by `|d|` of its plane equation, pair up equal-`|d|` faces with opposing normals, and take the planar convex∩convex overlap for the area. Every cut this crate makes produces exactly that shape, because `clip` hands the same cut ring to both halves.
+
+```rust,ignore
+let graph = cache.bonds(id).expect("baked");
+let mut broken = BondSet::new(graph);      // the caller owns the damage state
+broken.sever_all(graph.incident(hit));     // whatever your game decided to sever
+for island in graph.islands(&cache.tree(id).unwrap().leaves(), &broken) {
+    // one island per still-connected group. Spawn the ones that came loose.
+}
+```
+
+`islands` is stateless on purpose: hit it again, sever more bonds, call it again. Progressive destruction is that set growing, and keeping it on your side is what lets this work without the crate ever learning what health is.
+
+**Cells that touch without sharing a coplanar face get no bond**, and that is a refusal rather than a gap. It is the normal case between the proxy cells *you* supply — V-HACD and CoACD produce cells that abut without their boundary polygons agreeing — so each root's subtree comes out as its own island unless your decomposition shares faces. Closing that with a proximity heuristic would silently weld a head to a torso, which is the correctness loss the architecture exists to prevent.
+
 ## What it deliberately does not do
 
 **It does not compute a convex decomposition.** You supply the proxy cells; the crate cuts them. A consumer already running V-HACD or CoACD for colliders has a decomposition, and forcing a second, different one would be the fracture disagreeing with the physics about what the object is. `ProxyCell::from_box` covers a blocked-out subject.
@@ -141,6 +160,8 @@ Note what this does *not* claim. Fragment geometry is `f32` arithmetic, so cross
 | `FractureCache` | `Resource` | `leaves()`, `frontier_of()`, `at_depth()`, `tree()`, `fragments()`, `detached_chunk()`, `is_baked()` |
 | `Fragment` / `DetachedChunk` | struct | Mesh handles + `center_local` + `half_extents` |
 | `FragmentTree` / `TreeNode` / `FragmentId` | struct | The hierarchy, and the frontier queries that read one bake at any granularity |
+| `BondGraph` / `Bond` / `BondId` | struct | Which fragments share a face, where, and over how much area; `islands()` |
+| `BondSet` | struct | The caller's accumulated damage state — which bonds are severed so far |
 | `fracture_mesh()` / `Fracture` / `FragmentGeometry` | fn | The whole pipeline with no assets and no ECS |
 | `hash_f32()` | fn | The frozen integer hash the fracture seeds from |
 

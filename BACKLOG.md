@@ -176,9 +176,34 @@ unchanged and `tests/leaf.rs` stays green; no new type is named for a weapon or 
 | | ticket | size |
 |---|---|---|
 | [x] | **AG-015 — the fracture hierarchy: one bake, every granularity.** Record the forest the cut loop already walks; keep parents instead of overwriting them. `FragmentTree`/`TreeNode`/`FragmentId`, frontier queries on `Fracture` and `FractureCache`, `FractureSettings::max_depth`. | M |
-| [ ] | **AG-016 — the bond graph: which fragments actually touch.** Parent–child bonds from the tree are free but insufficient — two leaves of a common ancestor need not touch. Müller's coplanar-face match (sort faces by \|d\|, match equal-\|d\| opposite normals, planar convex∩convex overlap for the area) is exact for convex cells. Plus stateless `islands(graph, broken)`. | M |
+| [x] | **AG-016 — the bond graph: which fragments actually touch.** Parent–child bonds from the tree are free but insufficient — two leaves of a common ancestor need not touch. Müller's coplanar-face match (sort faces by \|d\|, match equal-\|d\| opposite normals, planar convex∩convex overlap for the area) is exact for convex cells. Plus stateless `islands(graph, broken)`. | M |
 | [ ] | **AG-017 — severance queries.** Five pure region→fragment-set functions: `spread` (nearest fragment then breadth-first along bonds with falloff — a bullet takes one chunk), `capsule`, `swept_triangle`, `radial`, `shear`. Falloff follows Blast: full inside `min_r`, linear to zero at `max_r`. | M |
 | [ ] | **AG-018 — the cheap look fixes, and delete `impact_dir`.** Offset the cut plane along its normal by a hashed fraction instead of always through the centroid; weight piece selection by `volume * (0.5 + hash)` on a stable node id so sizes spread Mott-ward. **This is the stage that moves emitted geometry** — regenerate `docs/fracture-tier-ab.gif`. `impact_dir` biased only the first two cut *normals*, never the plane position, was hardcoded `None` by the bake and passed `None` by every caller; the runtime queries supersede it, so it goes. | S |
+
+### AG-016, as landed
+
+**Pre-registered prediction: the coplanar match recovers every cut-adjacency exactly and finds
+nothing between the caller's root cells, so the torso and the head come back as two islands.**
+
+**Half confirmed, half falsified — and the falsified half was ours, not the algorithm's.** Cut
+adjacency is recovered exactly, as predicted: all seven bond tests passed on the first run, including
+connectivity and the localised break. But the two-shell fixture comes back as **one** island, not
+two. The head cell's underside sits at `y = 0.5` and the torso cell's top face sits at `y = 0.5` —
+they are exactly coplanar, so there is a real shared face and the match correctly finds it. The
+example had been written asserting the opposite before it was run.
+
+That is worth keeping because the prediction was not idle: it was reasoning about interpenetrating
+shells, which is a real case (`BACKLOG.md`'s Sacht et al. note), and this fixture simply is not one.
+The two boxes *abut*. The refusal being tested is still pinned, by
+`cells_that_do_not_share_a_face_are_not_bonded`, on cells that genuinely interpenetrate.
+
+**Measured on the standard fixture:** 36 bonds over 12 finest fragments; intact, one island;
+severing one fragment's 3 bonds leaves islands of sizes `[11, 1]` — the localised break-off working
+on real baked geometry.
+
+**No proximity fallback was added, deliberately.** Cells that touch without agreeing on a face get no
+bond, which is the normal case between V-HACD or CoACD root cells. Approximating there would weld a
+head to a torso with a tolerance no caller could tune, so it is refused and documented instead.
 
 > **Weak-axis bias is deliberately deferred.** Choosing each cut normal to minimise cross-section
 > area — a cheap stand-in for Sellán's fracture modes, and what would make a character come apart at

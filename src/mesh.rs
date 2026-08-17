@@ -11,6 +11,7 @@ use bevy::log::warn;
 use bevy::math::{Mat3, Mat4, Vec2, Vec3};
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 
+use crate::bond::BondGraph;
 use crate::proxy::ProxyCell;
 use crate::soup::{Soup, fracture};
 use crate::tree::{FragmentId, FragmentTree};
@@ -476,12 +477,26 @@ pub fn fracture_mesh(
         return Fracture::default();
     }
     let (pieces, tree) = fracture(soup, proxy, target, min_fraction, max_depth, seed);
+    let bonds = bond_graph(&pieces, &tree);
     let fragments = pieces
         .into_iter()
         .enumerate()
         .map(|(i, p)| geometry_from_piece(FragmentId(i as u32), p))
         .collect();
-    Fracture { fragments, tree }
+    Fracture { fragments, tree, bonds }
+}
+
+/// Match up which of a bake's finest fragments share a face.
+///
+/// Built over the leaves rather than every node because adjacency is only meaningful between pieces
+/// that coexist, and the leaves are the one frontier every other is derived from.
+pub(crate) fn bond_graph(pieces: &[crate::soup::Piece], tree: &FragmentTree) -> BondGraph {
+    let members: Vec<(FragmentId, &ProxyCell)> = tree
+        .leaves()
+        .into_iter()
+        .filter_map(|id| pieces.get(id.index()).map(|p| (id, &p.cell)))
+        .collect();
+    BondGraph::build(&members, tree.len())
 }
 
 /// **One bake: every fragment the cut loop produced, plus the hierarchy that says how they nest.**
@@ -496,6 +511,9 @@ pub struct Fracture {
     pub fragments: Vec<FragmentGeometry>,
     /// Which fragments nest inside which, and the frontier queries that read it.
     pub tree: FragmentTree,
+    /// Which fragments *touch* which, over the finest frontier. Nesting and neighbouring are
+    /// different questions, and a localised break needs the second one.
+    pub bonds: BondGraph,
 }
 
 impl Fracture {
