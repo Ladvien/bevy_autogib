@@ -2,7 +2,26 @@
 
 Written from the consuming side, against `isomesh` at `4369e3c` — the rev `Cargo.toml` pins. Each ask
 says what autogib does with it and what stays blocked without it, so the priority argument is legible
-rather than asserted. Two of the five already exist as isomesh tickets and mostly need re-aiming.
+rather than asserted.
+
+> **Status, and read it before acting on any ask below.** isomesh's `HEAD` is **229 commits past the rev
+> we pin**, and three of these five have been answered there without us noticing. Nothing in this
+> document affects a build until the pin moves, which is a deliberate decision recorded in `Cargo.toml`
+> and now a ticket of its own (**AG-013**). Current state, verified at both revs:
+>
+> | Ask | At `4369e3c` (pinned) | At `HEAD` |
+> |---|---|---|
+> | 1 — `TriangleGrid` public | `pub(crate)` | **still `pub(crate)`** — not granted as written |
+> | 2 — mesh field | absent | **`MeshField` exists**, but pseudonormal-signed, not winding-signed |
+> | 3 — attribute-aware weld | absent | **granted** — `weld_split_by` (`weld.rs:338`) |
+> | 4 — convex decomposition | absent | still absent, and still declined |
+> | 5 — fold inside a fan | absent | still absent |
+>
+> **A separate correction, carried into `BACKLOG.md` as "correction #2".** The `S-001…S-007` tickets
+> this document argues against were **uncommitted intent** at the time of our audit, not shipped
+> capability — `signed_distance_from_mesh_winding` and `SampledField` did not exist at `4369e3c`. They
+> exist at `HEAD` now. So the claim we corrected was wrong about *when*, not about *what*, and the
+> correction needs that qualifier or it becomes wrong itself.
 
 **Context.** autogib pre-fractures a mesh by recursively plane-cutting a triangle soup and capping each
 cut. isomesh is now a real dependency of it (`no_std`, one transitive dep, `[f32; 3]` public API — that
@@ -27,19 +46,38 @@ is the most portable geometry in the repo and autogib would otherwise reimplemen
 variant returning the winning triangle index and the closest point would serve normal reconstruction
 and would cost nothing extra at the query site — the information is already computed and discarded.
 
-**Blocked without it:** ask 2, and therefore autogib's whole SDF fracture backend.
+**Blocked without it:** ask 2, and therefore autogib's whole SDF fracture backend — which is itself no
+longer a blocker; see the re-scoping note on ask 2.
+
+> **Not granted as written, and worth understanding why.** At `HEAD`, `TriangleGrid` and
+> `point_triangle_distance_squared` are **still `pub(crate)`** at the same two lines. Upstream solved the
+> problem a level up instead, by growing a public `MeshField` that performs the query itself and keeps
+> the grid private. That is a defensible call — it exports a capability rather than an internal — but it
+> means the "reimplement it worse" outcome this ask was trying to avoid is still live for any consumer
+> that wants the raw distance query rather than a field.
 
 ---
 
 ## Ask 2 — A mesh field: distance magnitude × winding-number sign
 
-**This is the one that matters, and it is narrower than the backlog currently makes it look.**
+> **Re-scoped. This was "the only hard blocker"; it is now optional.** The reason is not that isomesh
+> changed — it is that autogib's critical path did. Tier A/B (AG-001) repairs the cutter by cutting a
+> convex proxy, so an SDF backend stops being the route to correct fragments and becomes one possible
+> route to a *different* kind of fragment. Nothing below is withdrawn; it is simply no longer blocking.
+>
+> **And the premise this ask was built on is false.** It argued for an on-demand `impl Sdf` partly
+> because "sampling on demand is the right shape for Manifold Dual Contouring, which queries where it
+> needs to rather than reading a precomputed grid". **MDC does no such thing.** `DualMesher::extract`
+> calls `self.sample(sdf, shape, origin, cell_size)` (`dual.rs:251`) before anything else runs, and that
+> function (`dual.rs:272-289`) loops every one of the N³ grid points into a `Vec<R>`. It reads a dense
+> grid like every other extractor in the crate; the `Sdf` reference survives only to supply gradients.
+> The claim came from a summary of the paper rather than from the source — and upstream has since
+> written the same refutation into its own tree (`construct/from_mesh.rs:458-465`).
 
 `S-007` ("Mesh → SDF by generalized winding number") is blocked by `S-006`, which is blocked by
-`S-001` (exact Euclidean distance transform). **autogib needs none of that chain.** It does not want a
-sampled distance *volume*; it wants a `impl Sdf` it can evaluate on demand, whose magnitude comes from
-ask 1's grid and whose sign comes from a winding number. Sampling on demand is also the right shape for
-Manifold Dual Contouring, which queries where it needs to rather than reading a precomputed grid.
+`S-001` (exact Euclidean distance transform). autogib wants none of that chain: not a sampled distance
+*volume*, but a `impl Sdf` whose magnitude comes from ask 1's grid and whose sign comes from a winding
+number.
 
 **Suggested split:** a ticket that depends on ask 1 alone, delivering roughly
 
@@ -65,7 +103,22 @@ the opposite case: S-007's framing, "for imported or damaged input", is a precis
 A character merged from several closed shells is non-manifold exactly where those shells meet, and
 that is where the pseudonormal's precondition fails.
 
-**Blocked without it:** the entire SDF backend. This is the only hard blocker in the list.
+**Blocked without it:** the SDF backend, and nothing else. **Not a hard blocker** — see the re-scoping
+note at the top of this ask.
+
+> **Upstream has measured this and the answer is no, at least in the shape asked for.** `HEAD` grew a
+> `MeshField` (`construct/from_mesh.rs:501`), but it is **pseudonormal-signed**, which is the `S-006`
+> route this ask argues does not serve autogib: it requires closed, consistently oriented input, and
+> "an open mesh has boundary edges whose pseudonormal answers a question that has no answer, because
+> there is no inside" (`from_mesh.rs:480-495`). The winding-number variant exists only as a *batch*
+> function over a grid, and upstream records why an on-demand twin is not viable: `winding_numbers`
+> casts **one ray per grid row** and amortises it across every sample in that row, so a per-point query
+> would cast N³ rays for the same grid — "a factor of N, not a constant… there is no on-demand twin of
+> it."
+>
+> So if the pin ever moves, the SDF backend is unblocked **by a different route than this ask
+> describes** — a batch GWN field over a grid, which is precisely the thing this ask said autogib did
+> not want. That trade deserves re-deciding on its merits rather than being inherited.
 
 ---
 
@@ -97,6 +150,12 @@ before `remap` is written.
 
 **Not blocked without it** — autogib can write its own composite key — but every consumer with hard
 edges will hit this, and each will solve it differently.
+
+> **Granted, at `HEAD`.** `weld_split_by` (`weld.rs:338`) is option 1 above: weld positions, then split
+> back apart on a caller-supplied key. `epsilon_for` (`weld.rs:220`) came with it. This is the ask with
+> the most direct consequence for us — **AG-005** was scoped to hand-roll exactly this against
+> `Welder::remap()`, and if AG-013 moves the pin it should use `weld_split_by` instead and shrink to
+> almost nothing.
 
 ---
 
@@ -161,10 +220,10 @@ cannot see a doubly-wound fold, and a narrow-phase check inside a fan is the onl
 
 ## Summary
 
-| Ask | Cost | Blocks |
-|---|---|---|
-| 1 — `TriangleGrid` / `point_triangle_distance_squared` public | visibility change | ask 2, and thus the SDF backend |
-| 2 — mesh field (grid distance × GWN sign), **split from the `S-001→S-006→S-007` chain** | L | the SDF backend — the only hard blocker |
-| 3 — attribute-aware weld | M | nothing, but every hard-edged consumer hits it |
-| 4 — convex decomposition | L | nothing; it is the collider *answer*, not a dependency |
-| 5 — self-intersection inside a fan | S | nothing, but the cheaper topological route above is **sufficient, not necessary** — it cannot see a doubly-wound fold |
+| Ask | Cost | Blocks | Status at `HEAD` |
+|---|---|---|---|
+| 1 — `TriangleGrid` / `point_triangle_distance_squared` public | visibility change | ask 2 | **not granted as written** — still `pub(crate)`; solved a level up by `MeshField` |
+| 2 — mesh field (grid distance × GWN sign) | L | the SDF backend — **no longer a hard blocker**, Tier A/B repairs the cutter instead | partially: `MeshField` exists but is pseudonormal-signed; on-demand GWN measured **not viable** |
+| 3 — attribute-aware weld | M | nothing, but every hard-edged consumer hits it | **granted** — `weld_split_by`; see AG-005 |
+| 4 — convex decomposition | L | nothing; it is the collider *answer*, not a dependency | still absent, still declined |
+| 5 — self-intersection inside a fan | S | nothing, but the cheaper topological route above is **sufficient, not necessary** — it cannot see a doubly-wound fold | still absent |

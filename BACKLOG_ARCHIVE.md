@@ -164,3 +164,39 @@ had been offered *upstream* in the unqualified form, which is the version that m
 > A duplicated first vertex would make that modulo wrap emit a degenerate final triangle. The other half
 > of the note is true and is now recorded in the doc comment: the apex is a plain vertex average, not an
 > area centroid.
+
+### ☑ AG-010 · Correct `docs/isomesh-upstream-asks.md`
+
+Four edits, not the three the ticket listed.
+
+**(a) The on-demand premise is retired.** Ask 2 argued for an evaluate-on-demand `impl Sdf` partly
+because "sampling on demand is the right shape for Manifold Dual Contouring, which queries where it
+needs to rather than reading a precomputed grid". MDC does no such thing: `DualMesher::extract` calls
+`self.sample(...)` at `dual.rs:251` before anything else runs, and that function loops every one of the
+N³ grid points into a `Vec<R>` (`dual.rs:272-289`). The `Sdf` reference survives only to supply
+gradients. The claim came from a summary of the paper rather than the source — and upstream has since
+written the same refutation into its own tree (`construct/from_mesh.rs:458-465`), so it is now citable
+to them rather than only to us.
+
+**(b) `S-001…S-007` recorded as uncommitted intent — with the qualifier that makes it true.** They did
+not exist at `4369e3c`. They exist at `HEAD` now. The correction as originally written ("zero lines of
+Rust changed") would itself have become false; it is wrong about *when*, not about *what*.
+
+**(c) Ask 2 re-scoped from "the only hard blocker" to optional**, and the reason recorded: isomesh did
+not change, autogib's critical path did. Tier A/B repairs the cutter by cutting a convex proxy, so an
+SDF backend stops being the route to correct fragments.
+
+> **Finding the ticket did not anticipate, and it inverts the ask.** Upstream measured the thing Ask 2
+> asked for and the answer is no *in that shape*. The `MeshField` that shipped is **pseudonormal**-signed
+> — the `S-006` route this very document argues does not serve autogib, because it needs closed
+> consistently-oriented input and our subject is non-manifold exactly where its shells meet. The
+> winding-number variant exists only as a **batch** function over a grid, and upstream records why an
+> on-demand twin cannot exist: `winding_numbers` casts one ray per grid *row* and amortises it across
+> that row, so a per-point query would cast N³ rays — "a factor of N, not a constant". So if the pin ever
+> moves, the SDF backend is unblocked **by exactly the route this ask said we did not want.**
+
+**(d) Added — per-ask status at `HEAD`, in a banner and a new summary-table column.** Ask 3 is
+**granted** (`weld_split_by`, `weld.rs:338`), which is the one with a direct consequence: AG-005 was
+scoped to hand-roll it. Ask 1 is **not granted as written** — `TriangleGrid` is still `pub(crate)`;
+upstream solved it a level up by exporting `MeshField` and keeping the grid private. Asks 4 and 5 are
+untouched.
