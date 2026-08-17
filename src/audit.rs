@@ -69,7 +69,7 @@ const CELL_SIZE: f64 = WELD_EPSILON as f64 / ValidateConfig::WELD_EPSILON_REL;
 /// The counts come from `isomesh`'s validator over the welded skin ∪ cap; the three predicates are its
 /// documented collider policy rather than this crate's opinion.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FragmentAudit {
+pub struct SolidAudit {
     /// Triangles the validator actually considered.
     pub triangles: u64,
     /// Vertices in the buffer as shipped, before the audit's weld — `3 * triangles` today.
@@ -127,7 +127,7 @@ pub struct FragmentAudit {
 
 /// Signed volume of a closed triangle surface, via the divergence theorem: `(1/6)·Σ (a × b)·c`.
 ///
-/// Meaningless for an open surface — read it only alongside [`FragmentAudit::is_closed`]. Computed on
+/// Meaningless for an open surface — read it only alongside [`SolidAudit::is_closed`]. Computed on
 /// the welded buffer so it matches the topology the rest of the audit reports.
 fn signed_volume(positions: &[[f32; 3]], indices: &[u32]) -> f32 {
     let mut v6 = 0.0f32;
@@ -151,7 +151,7 @@ fn signed_volume(positions: &[[f32; 3]], indices: &[u32]) -> f32 {
     v6 / 6.0
 }
 
-impl FragmentAudit {
+impl SolidAudit {
     /// No boundary edges: the shard's surface closes on itself.
     #[must_use]
     pub fn is_closed(&self) -> bool {
@@ -217,14 +217,28 @@ fn append(buf: &mut MeshBuffer<f32>, mesh: &Mesh) -> bool {
     true
 }
 
-/// Measure one finished fragment: weld skin ∪ cap, then validate.
+/// Measure a fragment's **drawn surface** — the subject's own skin plus the cut face, welded.
+///
+/// **Returns counts, not verdicts, and that is the whole point of the type.** A render fragment is a
+/// *subset* of the subject's surface: it is open because a subset is open, and asking whether it is
+/// watertight is a category error rather than a hard question. [`SurfaceReport`] therefore has no
+/// `is_closed`, no `supports_inside_outside` and no volume — there is nothing for them to mean.
+///
+/// For the closed artefact, ask [`audit_proxy`].
+///
+/// # What this cost before the type existed
+///
+/// The crate had one audit and pointed it at the drawn surface, so `examples/fracture_cube.rs`
+/// reported "2 of 12 manifold" and it read as a defect. Part of that was the slicer genuinely failing
+/// on a non-convex section; the rest was a closed-solid test applied to something that is not a solid.
+/// Splitting the types is what makes the second half impossible to report again.
 ///
 /// # Errors
 ///
 /// A `String` describing why the fragment could not be measured — it carried no drawable triangles, or
 /// the weld rejected its epsilon. Both are loud rather than silent, because an audit that quietly
 /// reported "no violations" for a fragment it never looked at is worse than no audit.
-pub fn audit_fragment(frag: &FragmentGeometry) -> Result<FragmentAudit, String> {
+pub fn audit_render(frag: &FragmentGeometry) -> Result<SurfaceReport, String> {
     let mut buf: MeshBuffer<f32> = MeshBuffer::new();
     // Skin and cap together — see the module docs for why measuring either alone is meaningless.
     if let Some(outer) = frag.outer.as_ref() {
@@ -236,20 +250,65 @@ pub fn audit_fragment(frag: &FragmentGeometry) -> Result<FragmentAudit, String> 
     if buf.indices.is_empty() {
         return Err("fragment has no drawable triangles to audit".to_string());
     }
+    let vertices_before_weld = buf.positions.len() as u64;
+    let report = weld_then_validate(&mut buf)?;
+    Ok(SurfaceReport {
+        triangles: report.faces,
+        vertices_before_weld,
+        vertices_after_weld: buf.positions.len() as u64,
+        open_edges: report.boundary_edges,
+        non_manifold_edges: report.non_manifold_edges,
+        non_manifold_vertices: report.non_manifold_vertices,
+        inconsistently_oriented_edges: report.inconsistently_oriented_edges,
+    })
+}
 
-    audit_buffer(buf)
+/// What a fragment's **drawn surface** turned out to be. Every field is a count to be *recorded*.
+///
+/// Deliberately missing: any predicate about closure, solidity or volume. Those are properties of a
+/// solid, and this is not one — [`SolidAudit`] is. See [`audit_render`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SurfaceReport {
+    /// Triangles the validator considered.
+    pub triangles: u64,
+    /// Vertices as shipped, before the audit's weld.
+    pub vertices_before_weld: u64,
+    /// Vertices after welding coincident positions.
+    pub vertices_after_weld: u64,
+    /// Edges incident to exactly one face.
+    ///
+    /// **Record this; never assert it is zero.** A nonzero count is expected — the skin ends where the
+    /// cut begins. What it is good for is *tracking*: a count that jumps after a change to the clipper
+    /// means the skin and the cap stopped meeting cleanly, which is a real regression even though no
+    /// absolute value is the correct one.
+    pub open_edges: u64,
+    /// Edges incident to three or more faces.
+    ///
+    /// **Small nonzero counts are normal and were measured before this doc was written**: a lone
+    /// cuboid cut into 8 pieces reports 3, because the audit's position-only weld merges vertices that
+    /// the shipped mesh keeps apart. Like [`Self::open_edges`], track it rather than asserting on it.
+    pub non_manifold_edges: u64,
+    /// Vertices whose incident faces do not form a single fan.
+    pub non_manifold_vertices: u64,
+    /// Edges whose two faces traverse them the same way, i.e. one is inside out.
+    ///
+    /// **This one is zero for a single closed shell** — clipping preserves winding, and the cuboid
+    /// above measures 0. It goes nonzero where *two shells meet*: a torso and a head that touch weld
+    /// their coincident faces together, and those interior faces disagree with their neighbours about
+    /// which way is out. That is a property of the subject, not of the fracture; see `AG-003`.
+    pub inconsistently_oriented_edges: u64,
 }
 
 /// Weld, validate and reinterpret one assembled buffer.
 ///
 /// Split out so the *proxy* can be measured by exactly the same path as the drawn surface — two tiers,
 /// one definition of what the numbers mean.
-pub(crate) fn audit_buffer(mut buf: MeshBuffer<f32>) -> Result<FragmentAudit, String> {
+pub(crate) fn audit_buffer(mut buf: MeshBuffer<f32>) -> Result<SolidAudit, String> {
     let vertices_before_weld = buf.positions.len() as u64;
     let report = weld_then_validate(&mut buf)?;
     let readiness = collider::from_report(&report);
 
-    Ok(FragmentAudit {
+    Ok(SolidAudit {
         triangles: report.faces,
         vertices_before_weld,
         vertices_after_weld: buf.positions.len() as u64,
@@ -281,7 +340,7 @@ fn weld_then_validate(buf: &mut MeshBuffer<f32>) -> Result<MeshReport, String> {
 
 /// Audit a fragment **as the solid it is** — its proxy cell, every face, closed.
 ///
-/// **The companion to [`audit_fragment`], and choosing between them is not a matter of taste.** A
+/// **The companion to [`audit_render`], and choosing between them is not a matter of taste.** A
 /// fragment is two artefacts and only one of them is a solid:
 ///
 /// | artefact | what it is | what may be asserted |
@@ -293,7 +352,7 @@ fn weld_then_validate(buf: &mut MeshBuffer<f32>) -> Result<MeshReport, String> {
 /// subset *is* open, not because anything went wrong. Before Tier A the crate had only one audit and
 /// pointed it at the drawn surface, which is why "2 of 12 manifold" read as a defect rather than as a
 /// measurement of the wrong thing.
-pub fn audit_proxy(frag: &FragmentGeometry) -> Result<FragmentAudit, String> {
+pub fn audit_proxy(frag: &FragmentGeometry) -> Result<SolidAudit, String> {
     let soup = crate::mesh::proxy_soup(&frag.cell);
     let mesh = crate::mesh::soup_to_mesh_all_faces(&soup)?;
     let mut buf: MeshBuffer<f32> = MeshBuffer::new();
@@ -307,11 +366,11 @@ pub fn audit_proxy(frag: &FragmentGeometry) -> Result<FragmentAudit, String> {
 /// omitted, so the returned length may be shorter than `frags` — deliberately, because padding the
 /// result with a fabricated clean audit is exactly the lie this module exists to stop telling.
 #[must_use]
-pub fn audit_fragments(frags: &[FragmentGeometry]) -> Vec<FragmentAudit> {
+pub fn audit_proxies(frags: &[FragmentGeometry]) -> Vec<SolidAudit> {
     frags
         .iter()
         .enumerate()
-        .filter_map(|(i, f)| match audit_fragment(f) {
+        .filter_map(|(i, f)| match audit_proxy(f) {
             Ok(a) => Some(a),
             Err(e) => {
                 warn!("autogib: fragment {i} could not be audited: {e}");
@@ -472,7 +531,7 @@ mod tests {
     fn the_audit_welds_before_it_measures() {
         let (cube, proxy) = cube_parts();
         let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 4, 0.05, 1, None);
-        let a = audit_fragment(&pieces[0]).expect("the first fragment can be audited");
+        let a = audit_render(&pieces[0]).expect("the first fragment can be audited");
         assert!(
             a.vertices_after_weld < a.vertices_before_weld,
             "the weld merged nothing ({} -> {}), so the topology counts describe an unwelded soup and mean nothing",

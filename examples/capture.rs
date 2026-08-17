@@ -7,7 +7,7 @@
 //! the geometry differs.
 //!
 //! **The skin colour is the finding, not decoration.** Each fragment is audited with
-//! [`bevy_autogib::audit_fragment`] and tinted by the verdict:
+//! [`bevy_autogib::audit_proxy`] and tinted by the verdict:
 //!
 //! | colour | meaning |
 //! |---|---|
@@ -99,7 +99,7 @@ impl Verdict {
     /// Reduce a fragment to its verdict. An unauditable fragment counts as [`Verdict::Open`] rather
     /// than being hidden — a piece we cannot measure is not a piece we get to call clean.
     ///
-    /// **This asks [`audit_proxy`], not `audit_fragment`, and the difference is the whole point.** A
+    /// **This asks [`audit_proxy`], not `audit_render`, and the difference is the whole point.** A
     /// fragment is two artefacts: a closed convex *cell*, and a *subset of the subject's own surface*
     /// which is open because a surface subset is open. Colouring by the render mesh's watertightness
     /// paints almost everything magenta and says nothing — it measures the wrong artefact.

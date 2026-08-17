@@ -7,7 +7,7 @@ mod mesh;
 mod proxy;
 mod soup;
 
-pub use audit::{FragmentAudit, audit_fragment, audit_fragments, audit_proxy};
+pub use audit::{SolidAudit, SurfaceReport, audit_proxies, audit_proxy, audit_render};
 pub use bake::{
     DetachedChunk, DetachedPart, Fragment, FractureCache, FractureProxy, FractureSubject,
     bake_fractures,

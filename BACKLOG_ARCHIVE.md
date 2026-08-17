@@ -333,3 +333,37 @@ where every fragment is green.
 > **Unlooked-for confirmation.** isomesh's own `T-022` note, found while working `AG-013`, reaches this
 > architecture independently: *"under the Tier A architecture a cap is a plane intersected with a convex
 > cell, which is provably a convex polygon and needs no CDT at all."*
+
+### ☑ AG-004 · Move each metric to the artefact it describes
+
+`FragmentAudit` is gone, split in two so the category error cannot be written again:
+
+| type | artefact | carries |
+|---|---|---|
+| `SolidAudit` | the proxy cell — a closed convex polyhedron | χ, genus, volume, `is_closed`, `supports_inside_outside` |
+| `SurfaceReport` | the drawn skin ∪ cut face — a surface *subset* | counts only. **No `is_closed`, no volume** |
+
+`audit_render` returns the second; `audit_proxy` and `audit_proxies` the first. The point is not naming
+hygiene — `SurfaceReport` has no closure predicate, so "is this render fragment watertight?" is a
+question the type system now refuses to let anyone ask.
+
+`examples/fracture_cube.rs` prints them under two headings that cannot be added together. The solid
+reads **12 of 12** on watertight, manifold, χ = 2 and collider-ready, enclosing 0.2493 — which is
+`0.21 + 0.0393`, the two cells exactly.
+
+> **A claim written into this ticket was wrong within the hour, and the fix was to measure.** The first
+> draft of the surface heading labelled non-manifold features and inside-out edges "← zero IS expected
+> here". The two-shell subject reported 11 and 8. Rather than soften the wording, both were measured
+> against a single closed shell (a lone cuboid, 8 pieces): **33 open edges, 3 non-manifold, 0
+> inside-out**. So:
+>
+> - **inside-out edges** genuinely are zero for one shell — clipping preserves winding. They appear only
+>   where *two shells meet*: torso and head touch at `y = 0.5`, their coincident faces weld together,
+>   and those now-interior faces disagree with their neighbours about which way is out. A property of
+>   the subject, not the fracture. `AG-003`.
+> - **non-manifold features** are *not* zero even for one shell. Three of them, from the audit's
+>   position-only weld merging vertices the shipped mesh keeps apart. Recorded in the field's doc as a
+>   measured baseline rather than asserted away.
+
+Both numbers are now printed side by side in the example, so the next reader gets the comparison rather
+than an unqualified claim.

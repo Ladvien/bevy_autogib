@@ -103,30 +103,53 @@ fn main() {
     println!("  {capped} of {} fragments carry at least one closed cut face.", pieces.len());
     println!();
 
-    // **And this is the proof, or the refusal of it.** `audit_fragments` welds each fragment's skin and
-    // cut faces together and asks a mesh validator what it actually is: closed or open, manifold or
-    // not, consistently wound or inside out, and whether a solver could build inside/outside
-    // pseudo-normals from it.
+    // **Two artefacts, two headings, and they must never be added together.** A fragment is a closed
+    // convex *cell* and a *subset* of the subject's own surface. The first is a solid and every verdict
+    // below is a claim about it; the second is open because a subset is open, so its numbers are
+    // recorded and nothing is asserted.
     //
-    // Open shards are EXPECTED for this input and are not a regression. A torso and a head are two
-    // closed shells that meet, so the merged solid is not a manifold at the seam, and a plane through
-    // that region produces boundary chains with no way to close — the slicer drops those rather than
-    // fanning garbage over them. What was missing until now was the count.
-    let audits = bevy_autogib::audit_fragments(&pieces);
-    let closed = audits.iter().filter(|a| a.is_closed()).count();
-    let manifold = audits.iter().filter(|a| a.is_manifold()).count();
-    let solid = audits.iter().filter(|a| a.supports_inside_outside).count();
-    let open_edges: u64 = audits.iter().map(|a| a.boundary_edges).sum();
-    let volume: f32 = audits.iter().filter(|a| a.is_closed()).map(|a| a.signed_volume).sum();
+    // This is not pedantry — it is the correction of a number this example used to print. It reported
+    // "2 of 12 manifold" from a closed-solid test applied to the drawn surface, and that read as a
+    // defect. The types now make the mistake unavailable: `SurfaceReport` has no `is_closed`.
+    let solids = bevy_autogib::audit_proxies(&pieces);
+    let closed = solids.iter().filter(|a| a.is_closed()).count();
+    let manifold = solids.iter().filter(|a| a.is_manifold()).count();
+    let collider_ready = solids.iter().filter(|a| a.supports_inside_outside).count();
+    let sphere = solids.iter().filter(|a| a.euler_characteristic == 2).count();
+    let volume: f32 = solids.iter().map(|a| a.signed_volume).sum();
 
-    println!("   audit of {} fragments (skin ∪ cut faces, welded, then validated)", audits.len());
+    println!("   THE SOLID — each fragment's convex proxy cell, every face, closed");
     println!("  ─────────────────────────────────────────────────────────────────────────────────");
-    println!("   watertight (no boundary edges)      {closed:>3} of {}", audits.len());
-    println!("   manifold                            {manifold:>3} of {}", audits.len());
-    println!("   solid enough for a mesh collider    {solid:>3} of {}", audits.len());
-    println!("   open cut edges, total               {open_edges:>3}");
-    println!("   volume enclosed by the closed ones  {volume:>7.4}");
+    println!("   watertight (no boundary edges)      {closed:>3} of {}", solids.len());
+    println!("   manifold                            {manifold:>3} of {}", solids.len());
+    println!("   topological sphere (χ = 2)          {sphere:>3} of {}", solids.len());
+    println!("   solid enough for a mesh collider    {collider_ready:>3} of {}", solids.len());
+    println!("   volume enclosed                     {volume:>7.4}");
     println!("  ─────────────────────────────────────────────────────────────────────────────────");
+    println!();
+
+    let surfaces: Vec<_> = pieces.iter().filter_map(|p| bevy_autogib::audit_render(p).ok()).collect();
+    let open: u64 = surfaces.iter().map(|s| s.open_edges).sum();
+    let nm: u64 = surfaces.iter().map(|s| s.non_manifold_edges + s.non_manifold_vertices).sum();
+    let flipped: u64 = surfaces.iter().map(|s| s.inconsistently_oriented_edges).sum();
+    let tris: u64 = surfaces.iter().map(|s| s.triangles).sum();
+
+    println!("   THE DRAWN SURFACE — skin ∪ cut face. **Open by construction; nothing here is a defect**");
+    println!("  ─────────────────────────────────────────────────────────────────────────────────");
+    println!("   triangles                           {tris:>3}");
+    println!("   open edges (recorded, not asserted) {open:>3}");
+    println!("   non-manifold features               {nm:>3}");
+    println!("   inside-out edges                    {flipped:>3}   ← the seam, see below");
+    println!("  ─────────────────────────────────────────────────────────────────────────────────");
+    println!("   Open edges are where the skin ends and the cut begins. A subset of a surface has a");
+    println!("   boundary; that is what makes it a subset. Track these, never assert them to zero.");
+    println!();
+    println!("   Measured for comparison, one closed shell (a lone cuboid, 8 pieces): 33 open edges,");
+    println!("   3 non-manifold features, 0 inside-out. So inside-out edges are specific to this");
+    println!("   subject — a torso and a head meet at y = 0.5, their coincident faces weld together,");
+    println!("   and interior faces disagree with their neighbours about which way is out. A real");
+    println!("   glTF character is non-manifold in exactly that way. AG-003 is the ticket for it.");
+    println!();
 
     // Same seed, same pieces — the property the whole crate is built around.
     let again = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, seed, None);
