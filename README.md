@@ -45,9 +45,13 @@ fn spawn_enemy(mut commands: Commands, assets: Res<AssetServer>) {
 
 // Later, at the moment of death — the launch is yours, and so is the solver.
 fn on_death(cache: Res<FractureCache>, subject: &FractureSubject) {
-    let Some(fragments) = cache.fragments(subject.0.id()) else { return };
-    for frag in fragments {
+    // One bake, read back at whatever granularity this death deserves. `leaves` is the finest;
+    // `frontier_of(3)` is the same cached bake as three big chunks.
+    for frag in cache.leaves(subject.0.id()) {
         let _ = (&frag.outer_mesh, &frag.cap_mesh, frag.center_local, frag.half_extents);
+    }
+    for frag in cache.frontier_of(subject.0.id(), 3) {
+        let _ = frag.id;
     }
 }
 ```
@@ -66,19 +70,40 @@ let body = Mesh::from(Cuboid::new(1.0, 2.0, 1.0));
 // running V-HACD or CoACD for colliders has these, and a blocked-out subject can use `from_box`.
 let proxy = vec![ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.5, 1.0, 0.5))];
 
-let pieces = bevy_autogib::fracture_mesh(
+let baked = bevy_autogib::fracture_mesh(
     &[(&body, Mat4::IDENTITY)],
     &proxy,
-    12,          // target fragment count
+    12,          // finest fragment count
     0.15,        // stop cutting below this fraction of the subject's size
+    64,          // how many cuts deep the hierarchy may go
     0xC0FFEE,    // seed — same seed, same pieces, every run
-    None,        // optional impact direction to bias the first cuts
 );
 
+// **One bake, every granularity.** The cut loop keeps each piece it split, so the same bake
+// answers "three pieces" and "all of them" without cutting twice.
+assert_eq!(baked.frontier_of(3).len(), 3);
+let pieces = baked.leaves();
 assert!(pieces.len() > 1);
 // Every piece is a closed convex solid — hand `cell` straight to a solver as one convex collider.
 assert!(pieces.iter().all(|p| p.outer.is_some() || p.cap.is_some()));
 ```
+
+## One bake, every granularity
+
+A bake does not produce *a* fragment set. It produces the whole binary forest it cut through — one tree per proxy cell — and any **frontier** of that forest is a valid decomposition that tiles the subject exactly once. Three big chunks for a cleaving blow and forty for a blast come from the same cached bake, read at two depths.
+
+This is nearly free, because the cut loop already computed it. Each cut splits one piece into two, so the piece set after *k* cuts *is* the `cells + k` piece decomposition; the loop used to overwrite the parent and throw that away. Keeping it costs no extra geometry work — only the memory of the parents' payloads, which `FractureSettings::max_depth` bounds. Measured on the torso-and-head fixture: ~1.4 ms → ~2.2 ms, tracking node count (23 built instead of 12).
+
+The reason to want this is the reason Müller, Chentanez & Kim give for rejecting static pre-fracture in the first place — "the number of hierarchical fracture levels is fixed" — and it is the shape PhysX Blast (chunk depth) and Unreal's Chaos (per-level damage thresholds) both arrived at independently.
+
+```rust,ignore
+cache.leaves(id)              // finest — what the cache handed out before the hierarchy
+cache.frontier_of(id, 3)      // the same bake as three pieces
+cache.at_depth(id, 2)         // every branch cut to the same level
+cache.tree(id)                // the topology itself: parents, children, depths
+```
+
+Frontiers may be **mixed-depth** — that is the point, and it is what a localised break-off needs: the struck arm resolves to its finest pieces while the torso stays a single chunk.
 
 ## What it deliberately does not do
 
@@ -112,10 +137,11 @@ Note what this does *not* claim. Fragment geometry is `f32` arithmetic, so cross
 | `AutogibSystems` | `SystemSet` | On `Update`. Gate it and order against it |
 | `FractureSubject(Handle<WorldAsset>)` | `Component` | What to break; the cache key and the seed source |
 | `DetachedPart` | `Component` | Subtree pruned out and baked as one intact chunk |
-| `FractureSettings` | `Resource` | Five bake dials; `init_resource`d, so yours wins if inserted first |
-| `FractureCache` | `Resource` | `fragments()`, `detached_chunk()`, `is_baked()` |
+| `FractureSettings` | `Resource` | Six bake dials; `init_resource`d, so yours wins if inserted first |
+| `FractureCache` | `Resource` | `leaves()`, `frontier_of()`, `at_depth()`, `tree()`, `fragments()`, `detached_chunk()`, `is_baked()` |
 | `Fragment` / `DetachedChunk` | struct | Mesh handles + `center_local` + `half_extents` |
-| `fracture_mesh()` / `FragmentGeometry` | fn | The whole pipeline with no assets and no ECS |
+| `FragmentTree` / `TreeNode` / `FragmentId` | struct | The hierarchy, and the frontier queries that read one bake at any granularity |
+| `fracture_mesh()` / `Fracture` / `FragmentGeometry` | fn | The whole pipeline with no assets and no ECS |
 | `hash_f32()` | fn | The frozen integer hash the fracture seeds from |
 
 `bake_fractures` is public so it can be named in an ordering constraint, but prefer the set.

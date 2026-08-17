@@ -5,9 +5,12 @@
 `docs/research-brief.md` (the open problems), `docs/isomesh-upstream-asks.md` (what we need from the
 validator).
 
-**15 tickets archived, 0 open.** The architectural change this backlog opened with has landed: the
-crate no longer cuts the triangle soup. It cuts a caller-supplied convex proxy and carries the render
-triangles along as a payload.
+**15 tickets archived, 4 open (AG-015 … AG-018).** The architectural change this backlog opened with
+has landed: the crate no longer cuts the triangle soup. It cuts a caller-supplied convex proxy and
+carries the render triangles along as a payload.
+
+**Phase 3 opens the crate to gameplay-driven fracture** — see "Phase 3" below. It answers
+`docs/research-brief.md`'s P4, which had been ranked last and never worked.
 
 **What survives here is the reasoning, not a work queue.** The sections below — the architecture
 argument, and the two corrections carried in from research — are kept because they explain *why* the
@@ -135,7 +138,82 @@ capability* should be independently verified before anything depends on them.
 
 ---
 
-## The backlog is clear
+## Phase 3 — gameplay-driven fracture
+
+**The problem, stated as it was reported:** the demo "looks like we took a guy, froze him, and then
+shattered him." That is structural, not cosmetic, and it has three separate causes.
+
+1. **One bake = one outcome.** Every death produced the same fragment set, all at once, all over the
+   body, with no relation to what killed it. `examples/explode.rs` makes it literal: intact for
+   2.5 s, then the whole subject is despawned and replaced.
+2. **No fragment had an identity or a neighbour.** `Fragment` carried a centre, an extent and a
+   cell. No id, no parent, no adjacency — so breaking off *one* piece was not expressible.
+3. **The cut geometry produces uniform convex shards.** Always-split-the-largest-by-volume drives
+   fragment volumes toward uniformity, and a plane through the centroid centres every piece.
+
+**The answer the literature gives is the same in three places, and it is not "bake harder".** Müller,
+Chentanez & Kim reject static pre-fracture precisely because "the number of hierarchical fracture
+levels is fixed" and "there is no way to align fracture patterns with the impact location"; their fix
+is a hierarchy plus runtime, impact-aligned *selection*, with island detection deciding what actually
+separated. PhysX Blast generalises that to a chunk hierarchy, a support graph of bonds, and damage
+programs mapping a geometric query onto which bonds break — its shader set (`ImpactSpread`,
+`CapsuleFalloff`, `TriangleIntersection` "useful for sweeping-blade effects", `RadialFalloff`,
+`Shear`) is one-for-one the behaviours asked for. Unreal's Chaos lands on a connection graph with
+per-level damage thresholds independently.
+
+**On the look specifically:** Sellán et al. (`10.1145/3549540`, already cited here) state that
+Voronoi and plane-cut prefracture "results in recognizable, unrealistic pieces" because it is blind
+to where a shape is weak — for a body, the thin cross-sections. DeepFracture
+(`10.48550/arXiv.2310.13344`) gives the quantitative half: real fragment volumes follow Mott's
+distribution, `P(V) = e^(−∛(ζV))` with `ζ = 6/V̄`. Many small, few large. Uniform sizes are the
+signature of a geometric cutter.
+
+**Where the boundary falls, decided before any code:** the crate gets *geometry only* — a hierarchy,
+an adjacency graph, and pure functions from a geometric region to a fragment set. Health, damage
+numbers, weapon identity, impulses and pooling stay with the caller. `CLAUDE.md`'s boundary list is
+unchanged and `tests/leaf.rs` stays green; no new type is named for a weapon or a body part.
+
+| | ticket | size |
+|---|---|---|
+| [x] | **AG-015 — the fracture hierarchy: one bake, every granularity.** Record the forest the cut loop already walks; keep parents instead of overwriting them. `FragmentTree`/`TreeNode`/`FragmentId`, frontier queries on `Fracture` and `FractureCache`, `FractureSettings::max_depth`. | M |
+| [ ] | **AG-016 — the bond graph: which fragments actually touch.** Parent–child bonds from the tree are free but insufficient — two leaves of a common ancestor need not touch. Müller's coplanar-face match (sort faces by \|d\|, match equal-\|d\| opposite normals, planar convex∩convex overlap for the area) is exact for convex cells. Plus stateless `islands(graph, broken)`. | M |
+| [ ] | **AG-017 — severance queries.** Five pure region→fragment-set functions: `spread` (nearest fragment then breadth-first along bonds with falloff — a bullet takes one chunk), `capsule`, `swept_triangle`, `radial`, `shear`. Falloff follows Blast: full inside `min_r`, linear to zero at `max_r`. | M |
+| [ ] | **AG-018 — the cheap look fixes, and delete `impact_dir`.** Offset the cut plane along its normal by a hashed fraction instead of always through the centroid; weight piece selection by `volume * (0.5 + hash)` on a stable node id so sizes spread Mott-ward. **This is the stage that moves emitted geometry** — regenerate `docs/fracture-tier-ab.gif`. `impact_dir` biased only the first two cut *normals*, never the plane position, was hardcoded `None` by the bake and passed `None` by every caller; the runtime queries supersede it, so it goes. | S |
+
+> **Weak-axis bias is deliberately deferred.** Choosing each cut normal to minimise cross-section
+> area — a cheap stand-in for Sellán's fracture modes, and what would make a character come apart at
+> neck and wrist rather than into shards — is the obvious next step after AG-018 and was scoped out
+> of this phase on purpose.
+
+### AG-015, as landed
+
+**Pre-registered prediction: keeping the parents changes no emitted geometry, and every currently
+green test stays green without re-blessing.**
+
+**Confirmed.** The cut sequence is preserved by keeping selection and the seed mix on *frontier
+slots* rather than node ids — a cut still reuses its own slot for the `above` half and pushes a new
+slot for `below`, exactly as the flat loop did, so the fact that ids no longer coincide with frontier
+positions is invisible to the plane sequence. All 36 unit tests, `tests/leaf.rs` and the doctests
+passed unchanged, including `fracture_output_is_bit_identical_across_runs`, `hash_f32_is_frozen`,
+and both `== 12` fragment-count assertions.
+
+**One thing was falsified, and it was a number we had been quoting.** `bake.rs` recorded the bake at
+**0.33 ms**. Re-measured on this machine, the *pre-change* code takes **~1.4 ms** and the hierarchy
+takes **~2.2 ms** — the ratio tracks node count (23 built instead of 12), which is the honest cost of
+keeping every piece the loop split. Both are far under AG-011's 50 ms threshold so the
+main-thread conclusion is unchanged, but the 0.33 ms figure was being repeated as though it had been
+re-checked, and it had not.
+
+**Two shapes had to change to keep the array index-parallel with the tree.** `geometry_from_piece`
+was fallible and its caller dropped the `None`s; dropping an entry would slide every id after it onto
+the wrong node, so it is now total — a piece that draws nothing keeps its slot with both meshes
+`None`, bounded by its cell, which is still a perfectly good convex collider. And `fracture_mesh`
+now returns `Fracture { fragments, tree }` rather than a flat `Vec`, because the flat `Vec` no longer
+has a single meaning: `into_leaves()` is the old one.
+
+---
+
+## The rest of the backlog is clear
 
 All fifteen tickets are in `BACKLOG_ARCHIVE.md`, each with what it cost and what it falsified. Six
 predictions were pre-registered; **five came back different from what was predicted**, and those

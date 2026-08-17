@@ -13,6 +13,7 @@ use crate::FractureSettings;
 use crate::mesh::{append_mesh, geometry_from_piece, geometry_from_soup};
 use crate::proxy::ProxyCell;
 use crate::soup::{Soup, fracture};
+use crate::tree::{FragmentId, FragmentTree};
 
 /// **Marks an entity whose descendants should be pre-fractured, and names the asset to key that bake
 /// by.** Put it on the root the scene hangs under; the bake walks `Children` from there.
@@ -48,6 +49,9 @@ pub struct DetachedPart;
 /// with the rendered chunk. Either mesh may be `None` (a fragment with no cut faces has no cap; a
 /// pure-cap sliver has no outer skin).
 pub struct Fragment {
+    /// Which node of this source's [`FragmentTree`] this is — and its own index in the array
+    /// [`FractureCache::fragments`] returned.
+    pub id: FragmentId,
     pub outer_mesh: Option<Handle<Mesh>>,
     pub cap_mesh: Option<Handle<Mesh>>,
     /// **The fragment as a solid: one convex cell.** This is what a solver wants — a single convex
@@ -73,14 +77,57 @@ pub struct DetachedChunk {
 #[derive(Resource, Default)]
 pub struct FractureCache {
     body: HashMap<AssetId<WorldAsset>, Vec<Fragment>>,
+    trees: HashMap<AssetId<WorldAsset>, FragmentTree>,
     detached: HashMap<AssetId<WorldAsset>, DetachedChunk>,
     baked: HashSet<AssetId<WorldAsset>>,
 }
 
 impl FractureCache {
-    /// Baked body fragments for a source, or `None` if that source hasn't been baked.
+    /// **Every** baked fragment for a source, interior pieces of the hierarchy included, or `None`
+    /// if that source hasn't been baked.
+    ///
+    /// Index-parallel with [`tree`](Self::tree). Do not spawn this whole slice — it holds parents
+    /// and their children both, and spawning both puts the same volume in the scene twice. Spawn a
+    /// frontier: [`leaves`](Self::leaves) for the finest, [`frontier_of`](Self::frontier_of) for a
+    /// chosen granularity.
     pub fn fragments(&self, source: AssetId<WorldAsset>) -> Option<&[Fragment]> {
         self.body.get(&source).map(|v| v.as_slice())
+    }
+
+    /// The fracture hierarchy for a source: which fragments nest inside which, and the frontier
+    /// queries that read one bake at any granularity from the proxy cells up to the finest cut.
+    pub fn tree(&self, source: AssetId<WorldAsset>) -> Option<&FragmentTree> {
+        self.trees.get(&source)
+    }
+
+    /// The finest granularity — every fragment that was never cut further. **This is the set the
+    /// cache handed out before it kept a hierarchy**, so a caller that just wants the old behaviour
+    /// wants this.
+    pub fn leaves(&self, source: AssetId<WorldAsset>) -> Vec<&Fragment> {
+        self.pick(source, |t| t.leaves())
+    }
+
+    /// The frontier holding roughly `count` fragments, clamped to what this bake can offer — the
+    /// granularity dial. Three pieces for a cleaving blow, all of them for a blast, from one bake.
+    pub fn frontier_of(&self, source: AssetId<WorldAsset>, count: usize) -> Vec<&Fragment> {
+        self.pick(source, |t| t.frontier_of(count))
+    }
+
+    /// The frontier at most `depth` cuts from the caller's proxy cells.
+    pub fn at_depth(&self, source: AssetId<WorldAsset>, depth: u16) -> Vec<&Fragment> {
+        self.pick(source, |t| t.at_depth(depth))
+    }
+
+    /// Resolve the ids a frontier query chose against this source's fragment array. An id outside
+    /// the array is skipped rather than fatal.
+    fn pick<F>(&self, source: AssetId<WorldAsset>, choose: F) -> Vec<&Fragment>
+    where
+        F: FnOnce(&FragmentTree) -> Vec<FragmentId>,
+    {
+        let (Some(frags), Some(tree)) = (self.body.get(&source), self.trees.get(&source)) else {
+            return Vec::new();
+        };
+        choose(tree).into_iter().filter_map(|id| frags.get(id.index())).collect()
     }
 
     /// The baked [`DetachedPart`] chunk for a source, if any.
@@ -163,16 +210,19 @@ fn seed_from_path(path: &AssetPath) -> u32 {
     h
 }
 
-/// Turn one finished piece into cached mesh handles. `None` if it draws nothing.
-fn build_fragment(piece: crate::soup::Piece, meshes: &mut Assets<Mesh>) -> Option<Fragment> {
-    let g = geometry_from_piece(piece)?;
-    Some(Fragment {
+/// Turn one finished piece into cached mesh handles. Total, like [`geometry_from_piece`]: the
+/// fragment array is index-parallel with the hierarchy, so a piece that draws nothing still occupies
+/// its slot — with no meshes, and still a usable convex collider.
+fn build_fragment(id: FragmentId, piece: crate::soup::Piece, meshes: &mut Assets<Mesh>) -> Fragment {
+    let g = geometry_from_piece(id, piece);
+    Fragment {
+        id: g.id,
         outer_mesh: g.outer.map(|m| meshes.add(m)),
         cap_mesh: g.cap.map(|m| meshes.add(m)),
         cell: g.cell,
         center_local: g.center_local,
         half_extents: g.half_extents,
-    })
+    }
 }
 
 /// Bake the pruned part into a single intact chunk (no fracture), keeping its own material.
@@ -354,9 +404,16 @@ pub fn bake_fractures(
         let target = raw.clamp(settings.min_pieces, settings.max_pieces).max(1) as usize;
 
         // **The bake runs here, on the main thread, and `AG-011` settled that by measuring rather than
-        // arguing.** A 12-fragment torso-and-head fracture takes **0.33 ms** (release, stable across
-        // runs, `cargo run --release --example fracture_cube`). The ticket's own threshold was "a fix is
-        // warranted at 50 ms and not at 5 ms", so this is an order of magnitude the safe side of it.
+        // arguing.** The torso-and-head fixture at its finest 12 fragments measures **~2.2 ms**
+        // (release, `cargo run --release --example fracture_cube`), up from ~1.4 ms before the bake
+        // kept its hierarchy — the ratio tracks node count, 23 nodes built instead of 12, which is
+        // what keeping every piece the loop split costs. The ticket's own threshold was "a fix is
+        // warranted at 50 ms and not at 5 ms", so this stays well the safe side of it.
+        //
+        // The figure recorded here was **0.33 ms**, and re-measuring found that stale on this
+        // machine even before the change: the pre-hierarchy code measures ~1.4 ms today. Both
+        // numbers are below the threshold, so the conclusion is unchanged — but the old one was
+        // being quoted as if it had been re-checked, and it had not.
         //
         // Recording the alternative so nobody re-derives it: moving this to `AsyncComputeTaskPool`
         // would need `bevy/multi_threaded`, which this crate deliberately does not declare. Without it
@@ -365,20 +422,27 @@ pub fn bake_fractures(
         // feature unification. One code path that is concurrent in some consumers' builds and not
         // others is exactly the ambiguity `CLAUDE.md`'s one-path rule exists to prevent, and buying it
         // for 0.33 ms would be a bad trade twice over.
-        let pieces = fracture(
+        let (pieces, tree) = fracture(
             body,
             &proxy.0,
             target,
             settings.min_fraction,
+            settings.max_depth,
             seed_from_path(&asset_path),
-            None,
         );
         let frags: Vec<Fragment> = pieces
             .into_iter()
-            .filter_map(|piece| build_fragment(piece, &mut meshes))
+            .enumerate()
+            .map(|(i, piece)| build_fragment(FragmentId(i as u32), piece, &mut meshes))
             .collect();
-        info!("autogib: baked {} fragments for {asset_path}", frags.len());
+        info!(
+            "autogib: baked {} fragments for {asset_path} ({} in the finest frontier, {} cuts)",
+            frags.len(),
+            tree.leaves().len(),
+            tree.cuts()
+        );
         cache.body.insert(source, frags);
+        cache.trees.insert(source, tree);
 
         // The detached chunk (single intact piece, keeps its own material).
         if let Some(chunk) = bake_detached(&part, part_material, &mut meshes) {

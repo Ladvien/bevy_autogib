@@ -6,24 +6,30 @@ mod bake;
 mod mesh;
 mod proxy;
 mod soup;
+mod tree;
 
 pub use audit::{SolidAudit, SurfaceReport, audit_proxies, audit_proxy, audit_render};
 pub use bake::{
     DetachedChunk, DetachedPart, Fragment, FractureCache, FractureProxy, FractureSubject,
     bake_fractures,
 };
-pub use mesh::{FragmentGeometry, fracture_mesh};
+pub use mesh::{Fracture, FragmentGeometry, fracture_mesh};
 pub use proxy::ProxyCell;
 pub use soup::hash_f32;
+pub use tree::{FragmentId, FragmentTree, TreeNode};
 
 use bevy::prelude::*;
 
-/// How hard to break things. Five dials, all bake-time — nothing here decides how a chunk *moves*
+/// How hard to break things. Six dials, all bake-time — nothing here decides how a chunk *moves*
 /// after it exists, because that is the caller's physics, not this crate's business.
 ///
 /// The piece count is driven by the mesh's own bounding size rather than authored per asset:
 /// `pieces_base` is the count at `ref_extent`, scaled by how much bigger or smaller this mesh actually
 /// is, then clamped. So a rat and an ogre both break sensibly from one setting.
+///
+/// **These set the *finest* granularity, not the only one.** A bake keeps the whole hierarchy it cut
+/// through, so `max_pieces` is the ceiling a caller can ask for, not the count it must take —
+/// [`FragmentTree::frontier_of`] reads the same bake back at three pieces or at all of them.
 #[derive(Resource, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
@@ -39,6 +45,17 @@ pub struct FractureSettings {
     pub max_pieces: i32,
     /// Stop cutting a piece once its extent drops below this fraction of the whole mesh's extent.
     pub min_fraction: f32,
+    /// **Cuts from a proxy cell to the finest fragment — the hierarchy's memory bound.**
+    ///
+    /// A bake keeps every piece it ever held, not only the final ones, because that forest is what
+    /// lets one bake answer both "break this into three" and "break this into forty". The cost is
+    /// payload: each level of the forest holds the whole subject over again, so total geometry is
+    /// roughly this number times the subject's own triangle count.
+    ///
+    /// The default is deliberately slack enough never to bind at the default `max_pieces` — it is a
+    /// guard against a pathologically unbalanced subject, not a tuning dial. Lower it when memory
+    /// matters more than the finest granularity.
+    pub max_depth: u16,
 }
 
 impl Default for FractureSettings {
@@ -49,6 +66,7 @@ impl Default for FractureSettings {
             min_pieces: 6,
             max_pieces: 40,
             min_fraction: 0.18,
+            max_depth: 12,
         }
     }
 }
@@ -67,6 +85,16 @@ impl FractureSettings {
                  range, so fix the authored values",
                 self.min_pieces, self.max_pieces
             ));
+        }
+        // Zero depth permits no cut at all, so the bake would return the caller's proxy cells
+        // unchanged and report success. That is precisely the silent-degraded-result this crate
+        // refuses to produce: a subject that never breaks is a settings bug, not a fracture.
+        if self.max_depth == 0 {
+            return Err(
+                "bevy_autogib: max_depth is 0 — no cut is permitted, so the bake would return the \
+                 proxy cells unfractured and call it done. Use 1 or more."
+                    .to_string(),
+            );
         }
         Ok(())
     }

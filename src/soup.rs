@@ -10,6 +10,7 @@ use bevy::log::{info, warn};
 use bevy::math::{Vec2, Vec3};
 
 use crate::proxy::ProxyCell;
+use crate::tree::{FragmentId, FragmentTree, TreeNode};
 
 /// Classification tolerance: a vertex within `EPS` of the cut plane is treated as lying *on* it, so
 /// slicing near-coincident geometry doesn't spawn zero-area slivers. Positions are in subject-local
@@ -297,14 +298,28 @@ fn shells(soup: &Soup) -> Vec<Shell> {
 /// them. That is a deliberate narrowing of the architecture note, and it pays twice: the fragment is
 /// trivially closed and convex, and `AG-007` gets a solver-ready collider with no decomposition at
 /// spawn. Cells are never unioned across shells, so a head cannot weld itself to a torso.
+///
+/// # The returned forest
+///
+/// Every piece the loop ever held is returned, not just the final ones: a cut *adds* two children
+/// and leaves the parent in place rather than overwriting it. The [`FragmentTree`] says which is
+/// which, and [`FragmentTree::frontier_of`] reads the set back at any granularity from
+/// `proxy.len()` pieces up to `target`. Keeping the parents is the whole hierarchy feature and it
+/// costs no extra geometry work — only the memory of the payloads, which
+/// [`max_depth`](crate::FractureSettings::max_depth) bounds.
+///
+/// **The cut sequence is unchanged by that bookkeeping.** Selection still runs over the live
+/// frontier by slot, with the same volume metric and the same lower-slot tie-break, and the seed
+/// still mixes in the frontier size — so a bake taken before the tree existed and one taken after
+/// partition the mesh identically.
 pub(crate) fn fracture(
     render: Soup,
     proxy: &[ProxyCell],
     target: usize,
     min_fraction: f32,
+    max_depth: u16,
     seed: u32,
-    impact_dir: Option<Vec3>,
-) -> Vec<Piece> {
+) -> (Vec<Piece>, FragmentTree) {
     // Tier B assignment. Every triangle goes to the first cell containing its centroid — first, not
     // nearest, because overlapping shells (a head sunk into a torso) are the normal case and a
     // deterministic tie-break beats a distance that can flip on a rounding difference.
@@ -366,63 +381,96 @@ pub(crate) fn fracture(
     let whole: f32 = pieces.iter().map(|p| p.cell.volume()).sum();
     let f = min_fraction.max(0.0);
     let floor = whole * f * f * f;
-    let mut unsplittable = vec![false; pieces.len()];
+
+    // One node per proxy cell to start: the roots of the forest, uncut.
+    let mut nodes: Vec<TreeNode> =
+        (0..pieces.len()).map(|_| TreeNode { parent: None, children: None, depth: 0, split_at: None }).collect();
+    // **The live frontier, by slot.** `live[slot]` is the node id currently occupying that slot, and
+    // the slot layout mirrors what the pre-hierarchy loop did to its `pieces` vector exactly: a cut
+    // reuses its own slot for the `above` half and pushes a new slot for `below`. Selection and the
+    // seed mix both read slots, never node ids, which is what keeps the cut sequence unmoved now
+    // that ids no longer coincide with frontier positions.
+    let mut live: Vec<usize> = (0..pieces.len()).collect();
+    let mut unsplittable = vec![false; live.len()];
+    let mut cuts: u32 = 0;
 
     let hard_cap = target * 16 + 32;
     for cut_index in 0..hard_cap {
-        if pieces.len() >= target.max(1) {
+        if live.len() >= target.max(1) {
             break;
         }
-        // SORT-OK: `total_cmp` over volumes with the index as tie-break — a total order, so the choice
+        // SORT-OK: `total_cmp` over volumes with the slot as tie-break — a total order, so the choice
         // is a function of the geometry alone and not of the vector's incidental layout.
-        let Some(i) = (0..pieces.len())
-            .filter(|&i| !unsplittable[i])
-            .max_by(|&a, &b| pieces[a].cell.volume().total_cmp(&pieces[b].cell.volume()).then(b.cmp(&a)))
+        let Some(slot) = (0..live.len())
+            .filter(|&s| !unsplittable[s])
+            .max_by(|&a, &b| {
+                pieces[live[a]].cell.volume().total_cmp(&pieces[live[b]].cell.volume()).then(b.cmp(&a))
+            })
         else {
             break;
         };
-        if pieces[i].cell.volume() < floor {
-            unsplittable[i] = true;
+        let parent = live[slot];
+        if pieces[parent].cell.volume() < floor {
+            unsplittable[slot] = true;
+            continue;
+        }
+        // The depth bound is a memory bound: total payload across the forest is roughly the deepest
+        // path times the subject's own triangle count, because every level holds the whole subject
+        // over again. A piece at the limit is retired exactly like one below the volume floor.
+        if nodes[parent].depth >= max_depth {
+            unsplittable[slot] = true;
             continue;
         }
 
-        // Seed mixing is unchanged from the soup cutter, including the `pieces.len()` term: the plane
+        // Seed mixing is unchanged from the soup cutter, including the frontier-size term: the plane
         // sequence is a function of how many fragments exist so far, and changing that would move
         // every asset this crate has ever fractured.
         let s = seed
             .wrapping_add((cut_index as u32).wrapping_mul(2_654_435_761))
-            .wrapping_add(pieces.len() as u32);
-        let base_dir = random_dir(s);
-        let normal = match impact_dir {
-            Some(d) if cut_index < 2 => {
-                let blended = (base_dir + d.normalize_or_zero()) * 0.5;
-                if blended.length_squared() > 1.0e-6 { blended.normalize() } else { base_dir }
-            }
-            _ => base_dir,
-        };
-        let plane = Plane { point: pieces[i].cell.centroid(), normal };
+            .wrapping_add(live.len() as u32);
+        let plane = Plane { point: pieces[parent].cell.centroid(), normal: random_dir(s) };
 
-        let (Some(above), Some(below)) = pieces[i].cell.clip(&plane) else {
-            unsplittable[i] = true;
+        let (Some(above), Some(below)) = pieces[parent].cell.clip(&plane) else {
+            unsplittable[slot] = true;
             continue;
         };
         // Tier B: clip only. No `cap_side`, no loop recovery — the cap is `above`/`below`'s new face.
         let (mut ra, mut rb) = (Soup::default(), Soup::default());
-        split_render(&pieces[i].render, &plane, &mut ra, &mut rb);
+        split_render(&pieces[parent].render, &plane, &mut ra, &mut rb);
 
         // **A sheet goes wholly to one side.** Its centroid lay in the parent cell, so the sign of its
         // distance to this plane picks a half without ambiguity and without a fallback branch.
+        //
+        // Cloned rather than moved out: the parent piece survives as an interior node of the forest,
+        // and a coarser frontier will spawn it with its sheets still attached.
         let (mut sa, mut sb): (Vec<Soup>, Vec<Soup>) = (Vec::new(), Vec::new());
-        for sheet in std::mem::take(&mut pieces[i].sheets) {
+        for sheet in &pieces[parent].sheets {
             let c = sheet.pos.iter().copied().sum::<Vec3>() / sheet.pos.len().max(1) as f32;
-            if signed_dist(c, &plane) >= 0.0 { sa.push(sheet) } else { sb.push(sheet) }
+            if signed_dist(c, &plane) >= 0.0 { sa.push(sheet.clone()) } else { sb.push(sheet.clone()) }
         }
 
-        pieces[i] = Piece { cell: above, render: ra, sheets: sa };
+        let (above_id, below_id) = (nodes.len(), nodes.len() + 1);
+        let depth = nodes[parent].depth.saturating_add(1);
+        let kid = |parent: usize| TreeNode {
+            parent: Some(FragmentId(parent as u32)),
+            children: None,
+            depth,
+            split_at: None,
+        };
+        nodes.push(kid(parent));
+        nodes.push(kid(parent));
+        nodes[parent].children = Some([FragmentId(above_id as u32), FragmentId(below_id as u32)]);
+        nodes[parent].split_at = Some(cuts);
+
+        pieces.push(Piece { cell: above, render: ra, sheets: sa });
         pieces.push(Piece { cell: below, render: rb, sheets: sb });
+
+        live[slot] = above_id;
+        live.push(below_id);
         unsplittable.push(false);
+        cuts += 1;
     }
-    pieces
+    (pieces, FragmentTree::from_nodes(nodes, cuts))
 }
 
 /// Split a render payload by a plane into both half-spaces. **Clipping only** — a render fragment is a

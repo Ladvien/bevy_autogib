@@ -23,6 +23,8 @@ use bevy_autogib::{FragmentGeometry, ProxyCell, fracture_mesh};
 const TARGET: usize = 12;
 /// Stop cutting a piece once its extent drops below this fraction of the whole.
 const MIN_FRACTION: f32 = 0.15;
+/// How many cuts deep the hierarchy may go — slack enough here that `TARGET` is what binds.
+const MAX_DEPTH: u16 = 64;
 
 fn tri_count(mesh: Option<&Mesh>) -> usize {
     mesh.and_then(|m| m.indices()).map_or(0, |i| i.len() / 3)
@@ -59,8 +61,24 @@ fn main() {
     // **Timed, because `AG-011` asked whether the bake needs to move off the main thread and the honest
     // answer is a number rather than an opinion.** A fix is warranted at 50 ms and not at 5 ms.
     let started = std::time::Instant::now();
-    let pieces: Vec<FragmentGeometry> = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, seed, None);
+    let baked = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, MAX_DEPTH, seed);
     let elapsed = started.elapsed();
+
+    // **One bake, every granularity.** The cut loop keeps each piece it split rather than
+    // overwriting it, so the same bake reads back as three big chunks or as all of them — which is
+    // what lets a cleaving blow and a blast share one cached asset.
+    println!();
+    println!("  granularity — one bake, read back at each piece count:");
+    for want in [2usize, 3, 5, 8, TARGET] {
+        let f = baked.frontier_of(want);
+        let vol: f32 = f.iter().map(|p| p.cell.volume()).sum();
+        println!(
+            "    {want:>3} asked → {:>3} pieces, total volume {vol:.4}",
+            f.len()
+        );
+    }
+
+    let pieces: Vec<FragmentGeometry> = baked.into_leaves();
 
     println!();
     println!("bevy_autogib — a two-part solid, plane-cut into at most {TARGET} pieces (seed {seed:#010x})");
@@ -157,7 +175,7 @@ fn main() {
     println!();
 
     // Same seed, same pieces — the property the whole crate is built around.
-    let again = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, seed, None);
+    let again = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, MAX_DEPTH, seed).into_leaves();
     let identical = again.len() == pieces.len()
         && again
             .iter()

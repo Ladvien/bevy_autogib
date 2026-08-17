@@ -69,6 +69,8 @@ const RESTITUTION: f32 = 0.35;
 const GROUND_DRAG: f32 = 4.0;
 const TARGET: usize = 18;
 const MIN_FRACTION: f32 = 0.12;
+/// How many cuts deep the hierarchy may go — slack enough here that `TARGET` is what binds.
+const MAX_DEPTH: u16 = 64;
 const SEED: u32 = 0x00C0_FFEE;
 const ORIGIN: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 
@@ -294,7 +296,7 @@ fn break_it(app: &mut SubApps) {
         ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.35, 0.55, 0.2)),
         ProxyCell::from_box(Vec3::new(0.0, 0.74, 0.0), Vec3::splat(0.2)),
     ];
-    let pieces = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, SEED, None);
+    let pieces = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, MAX_DEPTH, SEED).into_leaves();
 
     // Audit first, so the tally can be logged next to the frames it describes.
     let verdicts: Vec<Verdict> = pieces.iter().map(Verdict::of).collect();

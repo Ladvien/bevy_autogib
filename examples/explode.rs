@@ -37,6 +37,8 @@ use bevy_autogib::{ProxyCell, fracture_mesh, hash_f32};
 const TARGET: usize = 18;
 /// Stop cutting a piece below this fraction of the whole solid's extent.
 const MIN_FRACTION: f32 = 0.12;
+/// How many cuts deep the hierarchy may go — slack enough here that `TARGET` is what binds.
+const MAX_DEPTH: u16 = 64;
 /// Downward acceleration, m/s². Exaggerated — gibs read better when they fall fast.
 const GRAVITY: f32 = 18.0;
 /// How much speed survives a bounce off the ground plane.
@@ -240,7 +242,7 @@ fn break_it(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &DemoMater
         ProxyCell::from_box(Vec3::new(0.0, 0.74, 0.0), Vec3::splat(0.2)),
     ];
     let seed = 0x00C0_FFEE_u32.wrapping_add(nth.wrapping_mul(2_654_435_761));
-    let pieces = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, seed, None);
+    let pieces = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, MAX_DEPTH, seed).into_leaves();
 
     for (i, piece) in pieces.into_iter().enumerate() {
         // Deterministic per-fragment variation from the crate's own frozen hash — no rand dependency.

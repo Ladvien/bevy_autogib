@@ -13,6 +13,7 @@ use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 
 use crate::proxy::ProxyCell;
 use crate::soup::{Soup, fracture};
+use crate::tree::{FragmentId, FragmentTree};
 
 /// Decode a mesh's index buffer into a triangle list, handling all encodings: `U16`, `U32`, and
 /// non-indexed (consecutive triples). `vertex_count` drives only the non-indexed case, whose
@@ -164,6 +165,9 @@ fn soup_to_mesh(soup: &Soup, want_interior: bool, recenter: Vec3) -> Option<Mesh
 /// Both meshes are recentered to `center_local` (their shared bounding-box center), so a body placed at
 /// `origin + center_local * scale` lines up with the rendered chunk.
 pub struct FragmentGeometry {
+    /// Which node of the [`FragmentTree`](crate::FragmentTree) this is. Always equal to this
+    /// fragment's own position in the array it came back in.
+    pub id: FragmentId,
     /// The subject's own surface — whatever material the intact subject wore. `None` for an interior
     /// fragment that the render mesh never reached.
     pub outer: Option<Mesh>,
@@ -358,8 +362,15 @@ pub(crate) fn proxy_soup(cell: &ProxyCell) -> Soup {
     s
 }
 
-/// Turn one finished piece into recentered meshes. `None` if it draws nothing at all.
-pub(crate) fn geometry_from_piece(piece: crate::soup::Piece) -> Option<FragmentGeometry> {
+/// Turn one finished piece into recentered meshes.
+///
+/// **Total, not fallible.** It used to return `None` for a piece that drew nothing and the caller
+/// dropped it, but the hierarchy makes the fragment array index-parallel with the
+/// [`FragmentTree`](crate::FragmentTree) — dropping an entry would slide every id after it onto the
+/// wrong node. A piece that draws nothing is still a *solid*: it has a convex cell, a centre and an
+/// extent, and it is a perfectly good collider. It comes back with both meshes `None` and is bounded
+/// by its cell rather than by a render mesh it never received.
+pub(crate) fn geometry_from_piece(id: FragmentId, piece: crate::soup::Piece) -> FragmentGeometry {
     let crate::soup::Piece { cell, render, sheets } = piece;
     // The cap comes from the cell, never from the render mesh — that is the architecture in one line.
     //
@@ -383,18 +394,29 @@ pub(crate) fn geometry_from_piece(piece: crate::soup::Piece) -> Option<FragmentG
             );
         }
     }
-    if drawn.is_empty() {
-        return None;
-    }
-    let (mn, mx) = drawn.bbox();
+    // Bound by the drawn surface when there is one, by the cell when there is not. The cell is the
+    // fragment's solid and always exists, so there is no case here with nothing to measure.
+    let (mn, mx) = if drawn.is_empty() { cell_bbox(&cell) } else { drawn.bbox() };
     let center = (mn + mx) * 0.5;
     let half_extents = ((mx - mn) * 0.5).max(Vec3::splat(0.01));
-    let outer = soup_to_mesh(&drawn, false, center);
-    let cap = soup_to_mesh(&drawn, true, center);
-    if outer.is_none() && cap.is_none() {
-        return None;
+    let (outer, cap) = if drawn.is_empty() {
+        (None, None)
+    } else {
+        (soup_to_mesh(&drawn, false, center), soup_to_mesh(&drawn, true, center))
+    };
+    FragmentGeometry { id, outer, cap, cell, center_local: center, half_extents }
+}
+
+/// Axis-aligned bounds of a cell's own vertices. `(ZERO, ZERO)` for a cell with no points, which
+/// [`ProxyCell::new`] cannot produce.
+fn cell_bbox(cell: &ProxyCell) -> (Vec3, Vec3) {
+    let mut mn = Vec3::splat(f32::INFINITY);
+    let mut mx = Vec3::splat(f32::NEG_INFINITY);
+    for p in cell.points() {
+        mn = mn.min(*p);
+        mx = mx.max(*p);
     }
-    Some(FragmentGeometry { outer, cap, cell, center_local: center, half_extents })
+    if cell.points().is_empty() { (Vec3::ZERO, Vec3::ZERO) } else { (mn, mx) }
 }
 
 /// **The whole pipeline, with no assets and no ECS.** Cut the caller's convex `proxy` into at most
@@ -424,8 +446,9 @@ pub(crate) fn geometry_from_piece(piece: crate::soup::Piece) -> Option<FragmentG
 ///
 /// Every `Mat4` is that sub-mesh's transform relative to the subject root. `min_fraction` stops a cell
 /// being cut once it drops below that fraction of the subject's *size* — a linear fraction, cubed
-/// internally to compare volumes, so no caller has to compute an extent first. `seed` drives every plane direction and is the only source of
-/// variation. `impact_dir`, when set, biases the first two cuts toward an impact.
+/// internally to compare volumes, so no caller has to compute an extent first. `max_depth` bounds how
+/// many cuts deep the returned hierarchy goes, and with it the payload memory. `seed` drives every
+/// plane direction and is the only source of variation.
 ///
 /// **`parts` order is load-bearing.** Cut planes pass through cell centroids, and the render payload's
 /// vertex order decides float sums elsewhere; float addition is not associative, so two different
@@ -436,26 +459,99 @@ pub fn fracture_mesh(
     proxy: &[ProxyCell],
     target: usize,
     min_fraction: f32,
+    max_depth: u16,
     seed: u32,
-    impact_dir: Option<Vec3>,
-) -> Vec<FragmentGeometry> {
+) -> Fracture {
     let mut soup = Soup::default();
     for (mesh, xform) in parts {
         append_mesh(&mut soup, mesh, *xform, false);
     }
     if proxy.is_empty() {
         warn!("autogib: refusing to fracture — the caller supplied no proxy cells");
-        return Vec::new();
+        return Fracture::default();
     }
     // A proxy with nothing to carry is not a subject. Cutting it would emit cap-only fragments of a
     // shape the caller never handed us a surface for.
     if soup.is_empty() {
-        return Vec::new();
+        return Fracture::default();
     }
-    fracture(soup, proxy, target, min_fraction, seed, impact_dir)
+    let (pieces, tree) = fracture(soup, proxy, target, min_fraction, max_depth, seed);
+    let fragments = pieces
         .into_iter()
-        .filter_map(geometry_from_piece)
-        .collect()
+        .enumerate()
+        .map(|(i, p)| geometry_from_piece(FragmentId(i as u32), p))
+        .collect();
+    Fracture { fragments, tree }
+}
+
+/// **One bake: every fragment the cut loop produced, plus the hierarchy that says how they nest.**
+///
+/// `fragments` is index-parallel with `tree` — `fragments[id.index()]` is the payload of
+/// `tree.node(id)` — so a frontier query returns ids that index straight into it. Spawn a frontier,
+/// never the whole array: the array holds interior pieces too, and spawning both a parent and its
+/// children would put the same volume in the scene twice.
+#[derive(Default)]
+pub struct Fracture {
+    /// Every node's geometry, in [`FragmentId`] order. Interior nodes included.
+    pub fragments: Vec<FragmentGeometry>,
+    /// Which fragments nest inside which, and the frontier queries that read it.
+    pub tree: FragmentTree,
+}
+
+impl Fracture {
+    /// The finest granularity — every piece that was never cut further. This is the set the crate
+    /// returned before it kept a hierarchy.
+    pub fn leaves(&self) -> Vec<&FragmentGeometry> {
+        self.pick(&self.tree.leaves())
+    }
+
+    /// The frontier holding roughly `count` pieces, clamped to what this bake can offer. **The
+    /// granularity dial**: three big pieces for a cleaving blow, all of them for a blast.
+    pub fn frontier_of(&self, count: usize) -> Vec<&FragmentGeometry> {
+        self.pick(&self.tree.frontier_of(count))
+    }
+
+    /// The frontier at most `depth` cuts from the caller's proxy cells.
+    pub fn at_depth(&self, depth: u16) -> Vec<&FragmentGeometry> {
+        self.pick(&self.tree.at_depth(depth))
+    }
+
+    /// Resolve ids to payloads, skipping any that fall outside the array. Out of range is refused
+    /// rather than fatal — an id from a stale bake must not take the process down.
+    pub fn pick(&self, ids: &[FragmentId]) -> Vec<&FragmentGeometry> {
+        ids.iter().filter_map(|id| self.fragments.get(id.index())).collect()
+    }
+
+    /// [`leaves`](Self::leaves), consuming the bake — for a caller that needs to own the meshes.
+    pub fn into_leaves(self) -> Vec<FragmentGeometry> {
+        let ids = self.tree.leaves();
+        self.into_pick(&ids)
+    }
+
+    /// [`frontier_of`](Self::frontier_of), consuming the bake.
+    pub fn into_frontier_of(self, count: usize) -> Vec<FragmentGeometry> {
+        let ids = self.tree.frontier_of(count);
+        self.into_pick(&ids)
+    }
+
+    /// [`at_depth`](Self::at_depth), consuming the bake.
+    pub fn into_at_depth(self, depth: u16) -> Vec<FragmentGeometry> {
+        let ids = self.tree.at_depth(depth);
+        self.into_pick(&ids)
+    }
+
+    /// [`pick`](Self::pick), consuming the bake. Returns the kept fragments in [`FragmentId`] order
+    /// regardless of the order `ids` arrived in, so the result reads the same whichever frontier
+    /// query produced it.
+    pub fn into_pick(self, ids: &[FragmentId]) -> Vec<FragmentGeometry> {
+        let mut keep = vec![false; self.fragments.len()];
+        for id in ids {
+            if let Some(slot) = keep.get_mut(id.index()) {
+                *slot = true;
+            }
+        }
+        self.fragments.into_iter().zip(keep).filter_map(|(f, k)| k.then_some(f)).collect()
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -494,12 +590,18 @@ mod tests {
         vec![ProxyCell::from_box(Vec3::ZERO, Vec3::splat(0.5))]
     }
 
+    /// Slack enough never to bind at any target these tests ask for, so a test that is about
+    /// something else is never quietly measuring the depth bound instead. The one test that *is*
+    /// about the bound passes its own.
+    const TEST_DEPTH: u16 = 64;
+
     /// A cut leaves each half on its own side, and the cap comes from the **cell**, not from loop
     /// recovery over the render mesh.
     #[test]
     fn slice_cube_axis_plane() {
         let (cube, _) = (Mesh::from(Cuboid::new(1.0, 1.0, 1.0)), ());
-        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), 2, 0.05, 7, None);
+        let pieces =
+            fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), 2, 0.05, TEST_DEPTH, 7).into_leaves();
         assert_eq!(pieces.len(), 2, "one cut should give two pieces");
         for p in &pieces {
             assert!(p.cap.is_some(), "every piece of a cut carries a cap face");
@@ -526,16 +628,58 @@ mod tests {
     #[test]
     fn fracture_reaches_target_and_is_deterministic() {
         let proxy = cube_proxy();
-        let a = fracture(cube_soup(), &proxy, 8, 0.05, 0xABCD_1234, None);
-        let b = fracture(cube_soup(), &proxy, 8, 0.05, 0xABCD_1234, None);
+        let (a, ta) = fracture(cube_soup(), &proxy, 8, 0.05, TEST_DEPTH, 0xABCD_1234);
+        let (b, tb) = fracture(cube_soup(), &proxy, 8, 0.05, TEST_DEPTH, 0xABCD_1234);
         assert_eq!(a.len(), b.len());
-        assert!(a.len() >= 2 && a.len() <= 8, "reached a sane fragment count: {}", a.len());
-        assert!(a.iter().all(|p| !p.render.is_empty()), "every piece kept some render surface");
+        assert_eq!(ta, tb, "the hierarchy is reproducible, not just the geometry");
+        let leaves = ta.leaves();
+        assert!(leaves.len() >= 2 && leaves.len() <= 8, "sane fragment count: {}", leaves.len());
+        assert!(
+            leaves.iter().all(|id| a.get(id.index()).is_some_and(|p| !p.render.is_empty())),
+            "every leaf kept some render surface"
+        );
         assert!(
             a[0].cell.centroid().distance(b[0].cell.centroid()) < 1.0e-6,
             "deterministic per seed"
         );
         assert!(all_finite(&a[0].render), "render payload went non-finite");
+    }
+
+    /// **The hierarchy is not a second bake.** Every frontier of one bake tiles the same solid, so
+    /// the three-piece read and the finest read must agree on total volume to the last few bits.
+    #[test]
+    fn every_frontier_of_one_bake_conserves_the_whole_volume() {
+        let proxy = cube_proxy();
+        let (pieces, tree) = fracture(cube_soup(), &proxy, 8, 0.05, TEST_DEPTH, 0xABCD_1234);
+        let whole: f32 = proxy.iter().map(|c| c.volume()).sum();
+        for cuts in 0..=tree.cuts() {
+            let v: f32 = tree
+                .frontier_after(cuts)
+                .iter()
+                .filter_map(|id| pieces.get(id.index()))
+                .map(|p| p.cell.volume())
+                .sum();
+            assert!(
+                (v - whole).abs() < 1.0e-3,
+                "frontier after {cuts} cuts has volume {v}, expected {whole}"
+            );
+        }
+    }
+
+    /// The granularity dial: one bake, read back at every count between the proxy cells and the
+    /// finest cut.
+    #[test]
+    fn one_bake_answers_every_piece_count() {
+        let cube = Mesh::from(Cuboid::new(1.0, 1.0, 1.0));
+        let baked = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), 8, 0.05, TEST_DEPTH, 11);
+        let finest = baked.leaves().len();
+        assert!(finest >= 4, "expected a usable spread of granularities, got {finest}");
+        for want in 1..=finest {
+            let got = baked.frontier_of(want).len();
+            let expect = want.max(baked.tree.roots().len());
+            assert_eq!(got, expect, "asked for {want} pieces");
+        }
+        assert_eq!(baked.frontier_of(9_999).len(), finest, "past the finest clamps to the leaves");
     }
 
     #[test]
@@ -569,9 +713,25 @@ mod tests {
             cell.clip(&crate::soup::Plane { point: Vec3::splat(5.0), normal: Vec3::X });
         assert!(above.is_none(), "nothing above a plane past the cube");
         assert!(below.is_some(), "the whole cell lies below it");
-        // A `min_fraction` so large nothing may be cut must terminate, not loop to the hard cap.
-        let out = fracture(cube_soup(), &cube_proxy(), 4, 0.6, 42, None);
+        // A `min_fraction` this large stops the recursion early; the loop must *terminate* there
+        // rather than spin to its hard cap looking for a cut it is never allowed to make.
+        let (out, tree) = fracture(cube_soup(), &cube_proxy(), 4, 0.6, TEST_DEPTH, 42);
         assert!(!out.is_empty());
+        assert!(tree.cuts() <= 4, "the volume floor bounded the cuts, got {}", tree.cuts());
+        assert!(tree.leaves().len() <= 4, "and so bounded the finest frontier");
+    }
+
+    /// The depth bound retires a piece the same way the volume floor does — it stops, it does not
+    /// spin, and it does not silently produce a deeper tree than asked for.
+    #[test]
+    fn max_depth_bounds_the_hierarchy_without_looping() {
+        let (_, tree) = fracture(cube_soup(), &cube_proxy(), 32, 0.001, 2, 0x5EED_1234);
+        assert!(tree.cuts() > 0, "a depth of 2 still permits cuts");
+        assert!(
+            tree.iter().all(|(_, n)| n.depth <= 2),
+            "no node may sit deeper than the bound asked for"
+        );
+        assert!(tree.leaves().len() <= 4, "one cell cut at most twice deep is at most four leaves");
     }
 
     /// **A render fragment is open, and that is correct.** It is a surface subset of the subject's own
@@ -580,7 +740,8 @@ mod tests {
     #[test]
     fn a_render_fragment_carries_no_cap_of_its_own() {
         let cube = Mesh::from(Cuboid::new(1.0, 1.0, 1.0));
-        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), 4, 0.05, 3, None);
+        let pieces =
+            fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), 4, 0.05, TEST_DEPTH, 3).into_leaves();
         assert!(!pieces.is_empty());
         for p in &pieces {
             // The cap exists, and every one of its triangles came from the cell's cut faces.
@@ -596,8 +757,8 @@ mod tests {
         let cube = Mesh::from(Cuboid::new(1.0, 2.0, 1.0));
         let parts = [(&cube, Mat4::IDENTITY)];
         let proxy = vec![ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.5, 1.0, 0.5))];
-        let a = fracture_mesh(&parts, &proxy, 6, 0.05, 0xFEED_BEEF, None);
-        let b = fracture_mesh(&parts, &proxy, 6, 0.05, 0xFEED_BEEF, None);
+        let a = fracture_mesh(&parts, &proxy, 6, 0.05, TEST_DEPTH, 0xFEED_BEEF).into_leaves();
+        let b = fracture_mesh(&parts, &proxy, 6, 0.05, TEST_DEPTH, 0xFEED_BEEF).into_leaves();
 
         assert!(a.len() >= 2, "a 1x2x1 box should break into at least two pieces, got {}", a.len());
         assert_eq!(a.len(), b.len(), "same seed, same fragment count");
@@ -613,9 +774,9 @@ mod tests {
     /// An empty part list is not an error and not a panic — it is simply no fragments.
     #[test]
     fn fracture_mesh_of_nothing_is_empty() {
-        assert!(fracture_mesh(&[], &cube_proxy(), 8, 0.1, 1, None).is_empty());
+        assert!(fracture_mesh(&[], &cube_proxy(), 8, 0.1, TEST_DEPTH, 1).tree.is_empty());
         // And no proxy at all is a refusal, not a panic.
         let cube = Mesh::from(Cuboid::new(1.0, 1.0, 1.0));
-        assert!(fracture_mesh(&[(&cube, Mat4::IDENTITY)], &[], 8, 0.1, 1, None).is_empty());
+        assert!(fracture_mesh(&[(&cube, Mat4::IDENTITY)], &[], 8, 0.1, TEST_DEPTH, 1).tree.is_empty());
     }
 }

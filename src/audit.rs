@@ -420,13 +420,18 @@ mod tests {
         )
     }
 
-    /// The fracture `examples/fracture_cube.rs` runs, to the digit.
+    /// Slack enough never to bind at any target these tests ask for, so nothing here is quietly
+    /// measuring the depth bound instead of what it names.
+    const TEST_DEPTH: u16 = 64;
+
+    /// The fracture `examples/fracture_cube.rs` runs, to the digit — read at its finest frontier,
+    /// which is the set this fixture measured before the bake kept a hierarchy.
     fn torso_and_head_fracture(parts: &[Mesh; 2], proxy: &[ProxyCell]) -> Vec<FragmentGeometry> {
         let placed = [
             (&parts[0], Mat4::IDENTITY),
             (&parts[1], Mat4::from_translation(Vec3::new(0.0, 0.67, 0.0))),
         ];
-        fracture_mesh(&placed, proxy, 12, 0.15, 0x00C0_FFEE, None)
+        fracture_mesh(&placed, proxy, 12, 0.15, TEST_DEPTH, 0x00C0_FFEE).into_leaves()
     }
 
     /// **AG-005 — the shipped mesh shares vertices, and still keeps its creases.**
@@ -505,7 +510,7 @@ mod tests {
             (&parts[1], Mat4::from_translation(Vec3::new(0.0, 0.67, 0.0))),
             (&cape, Mat4::IDENTITY),
         ];
-        let pieces = fracture_mesh(&placed, &proxy, 12, 0.15, 0x00C0_FFEE, None);
+        let pieces = fracture_mesh(&placed, &proxy, 12, 0.15, TEST_DEPTH, 0x00C0_FFEE).into_leaves();
         assert!(!pieces.is_empty(), "the subject did not fracture");
 
         // The cape's triangles are the only ones with a -Z normal at z = -0.17, and they are
@@ -552,7 +557,7 @@ mod tests {
     fn fracture_output_is_bit_identical_across_runs() {
         let (cube, proxy) = cube_parts();
         let report = check_determinism(|out: &mut MeshBuffer<f32>| {
-            let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 8, 0.05, 0xC0FF_EE00, None);
+            let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 8, 0.05, TEST_DEPTH, 0xC0FF_EE00).into_leaves();
             for p in &pieces {
                 if let Some(m) = p.outer.as_ref() {
                     append(out, m);
@@ -578,7 +583,7 @@ mod tests {
     #[test]
     fn every_proxy_fragment_of_a_closed_solid_is_closed() {
         let (cube, proxy) = cube_parts();
-        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 8, 0.05, 0x5EED, None);
+        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 8, 0.05, TEST_DEPTH, 0x5EED).into_leaves();
         assert!(pieces.len() >= 2, "expected the cube to break, got {}", pieces.len());
         for (i, p) in pieces.iter().enumerate() {
             let a = crate::audit::audit_proxy(p).unwrap_or_else(|e| panic!("proxy {i} could not be audited: {e}"));
@@ -594,7 +599,7 @@ mod tests {
     #[test]
     fn fracture_conserves_volume() {
         let (cube, proxy) = cube_parts();
-        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 8, 0.05, 0x5EED, None);
+        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 8, 0.05, TEST_DEPTH, 0x5EED).into_leaves();
         let total: f32 = pieces.iter().filter_map(|p| crate::audit::audit_proxy(p).ok()).map(|a| a.signed_volume).sum();
         assert!(
             (total - 2.0).abs() < 1.0e-3,
@@ -643,7 +648,7 @@ mod tests {
     #[test]
     fn the_audit_welds_before_it_measures() {
         let (cube, proxy) = cube_parts();
-        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 4, 0.05, 1, None);
+        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 4, 0.05, TEST_DEPTH, 1).into_leaves();
         let a = audit_render(&pieces[0]).expect("the first fragment can be audited");
         assert!(
             a.vertices_after_weld < a.vertices_before_weld,
