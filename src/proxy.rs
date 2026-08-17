@@ -64,11 +64,10 @@ impl ProxyCell {
     ///
     /// Returns `None` — with a `warn!` naming the fault — for anything that cannot be a closed convex
     /// polyhedron: fewer than four faces, a ring shorter than a triangle, or an index outside `verts`.
-    /// **Convexity itself is the caller's promise and is not checked here**; verifying it costs a pass
-    /// over every (face, vertex) pair, and a caller handing in V-HACD output already knows. What a
-    /// slightly concave cell costs is a cut face that is slightly concave too, which the centroid fan
-    /// handles less well — a quality loss, not a crash. `AG-008`'s triangulator is the safety net for
-    /// exactly that case.
+    /// **Convexity is checked**, once, here — see [`Self::reject_if_concave`] for why that is the fix
+    /// rather than a triangulator that survives concave input. A concave cell produces concave cut
+    /// faces, and the centroid fan over one folds; refusing it names the fault at the boundary where a
+    /// caller can act on it.
     pub fn new(verts: Vec<Vec3>, faces: Vec<Vec<u32>>) -> Option<Self> {
         if faces.len() < 4 {
             warn!("autogib: proxy cell has {} faces; a closed polyhedron needs at least 4", faces.len());
@@ -85,13 +84,63 @@ impl ProxyCell {
             }
         }
         let face_cut = vec![false; faces.len()];
-        Some(Self { verts, faces, face_cut })
+        let cell = Self { verts, faces, face_cut };
+        cell.reject_if_concave()?;
+        Some(cell)
+    }
+
+    /// Refuse a cell that is not convex, naming the worst offender.
+    ///
+    /// **This is `AG-008`'s answer, and it is not the answer that ticket proposed.** AG-008 planned a
+    /// constrained Delaunay triangulator so a slightly concave cell would not corrupt the output. Under
+    /// Tier A that is the wrong shape of fix: `CLAUDE.md`'s one-path rule says a primary path that
+    /// cannot produce a usable result must **fail loudly**, not write a degraded substitute. A
+    /// triangulator that quietly survives bad input is exactly the "degraded substitute" the rule names
+    /// — and it would be a large piece of machinery whose only job is to make a caller's broken proxy
+    /// look like it worked.
+    ///
+    /// So the cell is checked at the door instead. Every vertex must lie on or behind every face plane.
+    /// The tolerance scales with the cell's own size, because a 10 m cell has more float slack in it
+    /// than a 10 cm one, and a fixed epsilon would reject the large one for being large.
+    ///
+    /// Checked **only here**, on the caller's own geometry. [`Self::clip`] needs no check: a plane
+    /// through a convex polyhedron yields two convex polyhedra, so convexity is an invariant once the
+    /// cell is admitted, and re-verifying it per cut would cost a pass over every (face, vertex) pair
+    /// for a result that cannot change.
+    fn reject_if_concave(&self) -> Option<()> {
+        let (mut mn, mut mx) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        for v in &self.verts {
+            mn = mn.min(*v);
+            mx = mx.max(*v);
+        }
+        let tol = (mx - mn).length().max(1.0) * 1.0e-4;
+
+        for fi in 0..self.faces.len() {
+            let Some((o, n)) = self.face_plane(fi) else {
+                warn!("autogib: proxy cell face {fi} is degenerate — it encloses no area");
+                return None;
+            };
+            let worst = self.verts.iter().map(|v| (*v - o).dot(n)).fold(f32::NEG_INFINITY, f32::max);
+            if worst > tol {
+                warn!(
+                    "autogib: proxy cell is not convex — a vertex sits {worst} in front of face {fi} \
+                     (tolerance {tol}). Refusing it rather than cutting a shape that is not the one you \
+                     described; every cut face of a concave cell is concave too, and the cap fan over \
+                     one folds."
+                );
+                return None;
+            }
+        }
+        Some(())
     }
 
     /// A box cell — the shape most test fixtures and many blocked-out subjects actually are.
     ///
     /// `half` is the half-extent on each axis, `center` its middle. Faces are wound counter-clockwise
     /// seen from outside, verified by `from_box_is_wound_outward`.
+    ///
+    /// Bypasses [`Self::new`]'s convexity check deliberately: a box is convex by construction, and this
+    /// is the crate's own geometry rather than a caller's promise.
     pub fn from_box(center: Vec3, half: Vec3) -> Self {
         let s = |x: f32, y: f32, z: f32| center + Vec3::new(x * half.x, y * half.y, z * half.z);
         // 0..3 = -Z face ring, 4..7 = +Z, in matching order so the side faces read off in pairs.
@@ -478,6 +527,54 @@ mod tests {
 
     fn unit_box() -> ProxyCell {
         ProxyCell::from_box(Vec3::ZERO, Vec3::splat(0.5))
+    }
+
+    /// **AG-008 — a concave cell is refused at the door, not survived downstream.**
+    ///
+    /// The witness is a cube with one vertex pushed *inward*, which is the cheapest non-convex
+    /// polyhedron that still has valid faces and correct winding. Nothing about it is malformed in the
+    /// ways `new` already rejects — it has eight vertices, six faces, every index in range — so if the
+    /// convexity check were absent it would be admitted and would silently produce folded cap fans on
+    /// every cut.
+    #[test]
+    fn a_concave_cell_is_refused() {
+        let mut verts = vec![
+            Vec3::new(-0.5, -0.5, -0.5),
+            Vec3::new(0.5, -0.5, -0.5),
+            Vec3::new(0.5, 0.5, -0.5),
+            Vec3::new(-0.5, 0.5, -0.5),
+            Vec3::new(-0.5, -0.5, 0.5),
+            Vec3::new(0.5, -0.5, 0.5),
+            Vec3::new(0.5, 0.5, 0.5),
+            Vec3::new(-0.5, 0.5, 0.5),
+        ];
+        let faces = vec![
+            vec![0, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![2, 3, 7, 6],
+            vec![0, 4, 7, 3],
+            vec![1, 2, 6, 5],
+        ];
+        // The same geometry is accepted while it is a box …
+        assert!(ProxyCell::new(verts.clone(), faces.clone()).is_some(), "a box must be admitted");
+
+        // … and refused once one corner is dented inward.
+        verts[6] = Vec3::new(0.1, 0.1, 0.1);
+        assert!(
+            ProxyCell::new(verts, faces).is_none(),
+            "a dented cube is not convex and must be refused, not cut"
+        );
+    }
+
+    /// The check must not reject a legitimate cell for being large — the tolerance scales with size.
+    #[test]
+    fn a_large_convex_cell_is_not_rejected_for_being_large() {
+        for half in [0.01f32, 1.0, 100.0] {
+            let c = ProxyCell::from_box(Vec3::ZERO, Vec3::splat(half));
+            let round_tripped = ProxyCell::new(c.points().to_vec(), c.faces().map(|f| f.to_vec()).collect());
+            assert!(round_tripped.is_some(), "a {half}-half-extent box was refused as non-convex");
+        }
     }
 
     /// Every face must point away from the interior, or `contains` and `volume` both invert.

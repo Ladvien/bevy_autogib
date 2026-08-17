@@ -5,7 +5,7 @@
 `docs/research-brief.md` (the open problems), `docs/isomesh-upstream-asks.md` (what we need from the
 validator).
 
-**14 tickets archived, 1 open.** Phase 0 is complete and the Tier A/B cutover has landed. This backlog opens with an architectural change: the crate is going to
+**15 tickets archived, 0 open.** The backlog is clear. Phase 0 is complete and the Tier A/B cutover has landed. This backlog opens with an architectural change: the crate is going to
 stop cutting the triangle soup.
 
 **Read this before working any ticket below.** This crate is now an independent repository and
@@ -164,7 +164,6 @@ dissolve, and a fix nobody measured beforehand is indistinguishable from a fix t
 
 | | ID | Ticket | Size | Blocked by |
 |---|---|---|---|---|
-| ☐ | **AG-008** | **Replace loop recovery with a CDT over a PSLG.** Shewchuk's `Triangle` (`10.1007/bfb0014497`) takes a **PSLG — a set of vertices and segments — not a polygon**, and that single change kills four of our failure modes at once:<br><br>• **figure-eight loop** — cannot be constructed; a self-touching vertex is just a degree-4 PSLG vertex<br>• **crossing segments** — resolved by inserting the intersection vertex; local, exact, no loop has to close<br>• **U / non-convex section** — the triangulation is constrained to segments, so the notch is never spanned and star-shapedness never arises<br>• **nested loop filled as a disc** — a flood fill halted at constrained edges, with **no containment query at all**, which is robust to welded shared vertices in a way parity testing is not<br><br>Shewchuk's own parenthetical is the design note: holes are handled this way to avoid *"a common outlook wherein one must define oriented curves whose insides are clearly distinguishable from their outsides."*<br><br>**An asymmetry in our favour:** the CDT-existence pathology Diazzi & Attene name (*"not guaranteed to exist for arbitrary input triangles"*) is **3D-only**. In a cut plane it never arises.<br><br>Under Tier A/B this capper only ever sees convex cross-sections, so it is **over-engineered by design** — that is the point. It is the safety net for non-convex proxy cells (a decomposer that returns slightly concave cells will not corrupt output) and it deletes the epsilon fan.<br>**Acceptance:** AG-002's and AG-006's `known_defect_` tests flip to their correct form in this commit. **If CDT + flood fill also fills the bore, the seeding is wrong, not the triangulator.** | L | AG-001 |
 
 ---
 

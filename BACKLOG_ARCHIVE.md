@@ -476,3 +476,40 @@ would need.
 > when it was carried correctly all along. The classification was right from the first run; the
 > assertion was measuring three coplanar surfaces. The cape now sits at `-0.16`, a plane no box face
 > occupies, with the reason written beside it.
+
+### ☑ AG-008 · Replace loop recovery with a CDT over a PSLG — **resolved differently, and deliberately**
+
+**No triangulator was written, and that is the finding rather than a shortcut.** The ticket's own body
+predicted this: *"Under Tier A/B this capper only ever sees convex cross-sections, so it is
+over-engineered by design."* Between the ticket being written and being reached, three things changed:
+
+1. **The four failure modes it listed no longer exist.** Figure-eight loops, crossing segments,
+   non-convex sections and nested-loop-as-disc were all properties of `assemble_loops`, which `AG-001`
+   deleted. A plane meets a convex cell in a convex polygon; there is no loop to recover.
+2. **Its acceptance criterion became unsatisfiable.** It asked that AG-002's and AG-006's
+   `known_defect_` tests "flip to their correct form in this commit". Those tests were deleted with the
+   code they indicted. Their findings live in this archive and in `docs/isomesh-upstream-asks.md`.
+3. **Upstream reached the same conclusion independently.** isomesh's `T-022` splits its own CDT ticket
+   and notes: *"under the Tier A architecture a cap is a plane intersected with a convex cell, which is
+   provably a convex polygon and needs no CDT at all."*
+
+**The residual risk is real, and it is answered by refusing rather than by surviving.** A caller can
+still hand in a slightly concave cell — a decomposer's output is approximate — and a concave cell yields
+concave cut faces whose centroid fan folds. AG-008 proposed a CDT so that input would not corrupt the
+output. That is the wrong shape of fix under this project's own rules: `CLAUDE.md` says a primary path
+that cannot produce a usable result must **fail loudly**, never write a degraded substitute. A
+triangulator whose only job is to make a broken proxy look like it worked *is* the degraded substitute.
+
+So `ProxyCell::new` checks convexity once, at the caller's boundary, and refuses with a message naming
+the offending face and the deviation. `from_box` bypasses it because a box is convex by construction and
+is this crate's own geometry. `clip` needs no check: convexity is an invariant once admitted, since a
+plane through a convex polyhedron yields two convex polyhedra — re-verifying per cut would cost a pass
+over every (face, vertex) pair for an answer that cannot change.
+
+Two tests: a cube with one corner dented inward is refused (and the same geometry admitted while it is
+still a box), and boxes at 0.01, 1.0 and 100.0 half-extent are all admitted — the tolerance scales with
+the cell's size, so a large cell is not rejected for being large.
+
+**If a caller ever genuinely needs concave cells supported**, this is the ticket to reopen, and the
+route is Shewchuk's PSLG flood fill as originally described — with `isomesh`'s `predicates` module
+(`orient2d`, `incircle`, landed at the rev `AG-013` pinned) as its exact-arithmetic floor.
