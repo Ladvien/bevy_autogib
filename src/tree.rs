@@ -186,6 +186,8 @@ impl FragmentTree {
                 }
             }
         }
+        // SORT-OK: FragmentIds by the whole value — ties are identical, and the walk starts from
+        // a caller-named node over the bake's own tree, never a query.
         out.sort_unstable();
         out
     }

@@ -224,6 +224,8 @@ impl BondGraph {
             }
         }
         let mut ids: Vec<FragmentId> = members.iter().map(|(id, _)| *id).collect();
+        // SORT-OK: FragmentIds sorted by the whole value — tied elements are identical — and the
+        // members come from the bake's own frontier, pure geometry, never an ECS query.
         ids.sort_unstable();
         BondGraph { bonds, incident, centers, members: ids }
     }
@@ -316,9 +318,13 @@ impl BondGraph {
                     stack.push(next);
                 }
             }
+            // SORT-OK: FragmentIds by the whole value — ties are identical, and the island was
+            // walked from the caller-supplied frontier, not a query.
             island.sort_unstable();
             out.push(island);
         }
+        // SORT-OK: islands are disjoint (the `seen` guard) and each is sorted, so `first()` is an
+        // island's unique minimum id — the key is total.
         out.sort_unstable_by_key(|i| i.first().copied());
         out
     }

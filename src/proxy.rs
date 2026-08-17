@@ -668,10 +668,10 @@ fn convex_ring(pts: &[Vec3], plane: &Plane) -> Vec<Vec3> {
     }
     let c: Vec3 = uniq.iter().copied().sum::<Vec3>() / uniq.len() as f32;
     let (u, v) = plane_basis(plane.normal);
+    // SORT-OK: `atan2` then raw bits — total, so the order is a function of the geometry alone.
     uniq.sort_by(|a, b| {
         let ka = (a - c).dot(v).atan2((a - c).dot(u));
         let kb = (b - c).dot(v).atan2((b - c).dot(u));
-        // SORT-OK: `atan2` then raw bits — total, so the order is a function of the geometry alone.
         ka.total_cmp(&kb)
             .then_with(|| a.x.to_bits().cmp(&b.x.to_bits()))
             .then_with(|| a.y.to_bits().cmp(&b.y.to_bits()))
