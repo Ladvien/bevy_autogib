@@ -4,15 +4,15 @@
 
 Runtime mesh fracture: take whatever meshes an entity actually loaded, recursively plane-cut them into watertight-capped chunks, bake that once per source asset, and swap the pieces in when the thing dies.
 
-![A blue two-part figure standing; a projectile takes the top off its head, another takes a piece off its shoulder, a slash cleaves its chest, a blade sweeps through its middle and a blast scatters what is left — the raw red interior showing on every cut face](docs/sever.gif)
-
-That is `examples/sever.rs`, recorded headless. The subject stays standing between blows and what comes off depends on where you hit it — a projectile takes a chunk, a blade cleaves, a blast finishes it. **[See all four examples →](docs/DEMOS.md)**
-
-The other half is the whole-subject burst, which is the shape a death actually wants:
-
-![The same figure standing intact, then bursting into tumbling fragments whose cut faces are raw red while their outer surfaces stay blue](docs/explode.gif)
+![A blue two-part solid standing intact, then bursting into tumbling fragments whose cut faces are raw red while their outer surfaces stay blue](docs/explode.gif)
 
 That is `examples/explode.rs`, unmodified and at its own 0.4× playback. The subject is intact, then it is its own fragments — the "break" is one despawn and a spawn, because the fracture was computed long before. **The red is not a colour choice, it is the whole idea:** every fragment comes back as two meshes, the subject's original surface and the faces this cut just created, so you can give the inside a different material. Render both with the skin material and the same fragments stop looking broken and start looking disassembled.
+
+A death wants that whole-subject burst. Everything else wants the other shape — the subject stays standing and you take pieces off where you hit it:
+
+![The same figure standing; a projectile takes the top off its head, another takes a piece off its shoulder, a slash cleaves its chest, a blade sweeps through its middle and a blast scatters what is left](docs/sever.gif)
+
+That is `examples/sever.rs`, on a fixed script. Run it and you aim it yourself. **[All four examples, with recordings →](docs/DEMOS.md)**
 
 > **This repo is the source of truth.** It owns the crate; changes are made here and nowhere else. [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) consumes it as a git dependency pinned to a rev, the same way any other consumer would. It was the other way round — a read-only `git subtree split` mirror — until recently, and that inversion is a known stale-read hazard: a `subtree split` carries only *commits*, so anything living uncommitted in the monorepo working tree could never arrive by that route. If you find a `crates/bevy_autogib/` in a monorepo checkout, it is a corpse.
 

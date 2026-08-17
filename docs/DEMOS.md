@@ -61,10 +61,19 @@ material and by how much damage the blow carried; the crate has neither fact.
 
 ## `explode` — prefracture, then one despawn and a spawn
 
-![The same figure standing intact, then bursting into tumbling fragments whose cut faces are raw red while their outer surfaces stay blue](explode.gif)
+![A blue two-part solid standing intact, then bursting into tumbling fragments whose cut faces are raw red while their outer surfaces stay blue](explode.gif)
 
 The other half, and the shape a death actually wants: the subject is intact, then it *is* its own
 fragments. The break is one despawn and a spawn, because the fracture was computed long before.
+
+> **This clip is a hand-framed asset, not a generated one** — 560×398, tighter crop, no burned-in
+> caption — and it is the repo's splash image. **Do not overwrite it from `capture`.** It was
+> clobbered once by exactly that, which is the only reason this note exists.
+>
+> It also predates the AG-018 shape change, so its fragments are more uniform than the ones the code
+> produces today. The clip below is the same subject and the same burst rendered from current
+> geometry, so nothing on this page is misrepresenting the cutter — only this one clip's *framing* is
+> historical.
 
 **The red is not a colour choice, it is the whole idea.** Every fragment comes back as two meshes —
 the subject's original surface and the faces this cut just created — so the inside can take a
@@ -180,16 +189,19 @@ palette so two GIFs a week apart are actually comparable.
 
 ```sh
 cargo run --release --example capture       -- --out frames-audit --tint audit
-cargo run --release --example capture       -- --out frames-demo  --tint demo
 cargo run --release --example capture_sever -- --out frames-sever
 
 LEGEND=audit tools/gif.sh frames-audit docs/fracture-tier-ab.gif "Tier A/B fracture — every fragment audited as a solid"
-LEGEND=none  tools/gif.sh frames-demo  docs/explode.gif          "explode — prefracture, then one despawn and a spawn"
 LEGEND=none  tools/gif.sh frames-sever docs/sever.gif            "sever — projectile, projectile, slash, blade, blast"
 ```
 
 `LEGEND=none` omits the green/amber/magenta key, which belongs only on the audit-tinted clip: a key
 naming colours that are not in the picture is worse than no key at all.
+
+**`docs/explode.gif` is deliberately absent from that list.** It is the splash asset described above,
+and `capture --tint demo` produces a differently-framed, captioned clip that is not a drop-in
+replacement for it. If it ever genuinely needs regenerating, render to a scratch path first and look
+at it next to the current one.
 
 The two recorders share `examples/common/` — the headless harness, and the subject and damage rules
 `sever` itself uses. That sharing is deliberate: a recorder that reimplements its subject drifts from
