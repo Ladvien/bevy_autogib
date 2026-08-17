@@ -10,7 +10,8 @@ use bevy::asset::AssetPath;
 use bevy::prelude::*;
 
 use crate::FractureSettings;
-use crate::mesh::{append_mesh, geometry_from_soup};
+use crate::mesh::{append_mesh, geometry_from_piece, geometry_from_soup};
+use crate::proxy::ProxyCell;
 use crate::soup::{Soup, fracture};
 
 /// **Marks an entity whose descendants should be pre-fractured, and names the asset to key that bake
@@ -20,6 +21,18 @@ use crate::soup::{Soup, fracture};
 /// bake — and swapping the asset needs no code change.
 #[derive(Component)]
 pub struct FractureSubject(pub Handle<WorldAsset>);
+
+/// **The caller's convex decomposition of the subject, in subject-local space.**
+///
+/// Required alongside [`FractureSubject`]: this crate cuts a proxy, and computing a convex
+/// decomposition is not its job — a consumer already running V-HACD or CoACD for colliders has one,
+/// and forcing a second, different decomposition would be the fracture disagreeing with the physics
+/// about what the object is. A blocked-out subject can build cells with [`ProxyCell::from_box`].
+///
+/// A subject with this component missing is `error!`-refused and never baked. That is deliberate: the
+/// alternative is synthesising a bounding box and silently fracturing the wrong shape.
+#[derive(Component)]
+pub struct FractureProxy(pub Vec<ProxyCell>);
 
 /// **Marks a subtree to be pruned out of the body and baked as one intact chunk**, keeping its own
 /// material — a carried weapon, a hat, a backpack. The walk does not descend past it.
@@ -37,8 +50,12 @@ pub struct DetachedPart;
 pub struct Fragment {
     pub outer_mesh: Option<Handle<Mesh>>,
     pub cap_mesh: Option<Handle<Mesh>>,
+    /// **The fragment as a solid: one convex cell.** This is what a solver wants — a single convex
+    /// collider, no decomposition at spawn time and no trimesh. See `AG-007`.
+    pub cell: ProxyCell,
     pub center_local: Vec3,
-    /// Half the bounding box per axis (local units) → sizes the chunk's box collider.
+    /// Half the bounding box per axis (local units). **A coarse bound, not the collider** —
+    /// [`Self::cell`] is the collider.
     pub half_extents: Vec3,
 }
 
@@ -146,12 +163,13 @@ fn seed_from_path(path: &AssetPath) -> u32 {
     h
 }
 
-/// Turn a fragment soup into cached mesh handles. `None` if it has no drawable triangles.
-fn build_fragment(soup: &Soup, meshes: &mut Assets<Mesh>) -> Option<Fragment> {
-    let g = geometry_from_soup(soup)?;
+/// Turn one finished piece into cached mesh handles. `None` if it draws nothing.
+fn build_fragment(cell: ProxyCell, render: &Soup, meshes: &mut Assets<Mesh>) -> Option<Fragment> {
+    let g = geometry_from_piece(cell, render)?;
     Some(Fragment {
         outer_mesh: g.outer.map(|m| meshes.add(m)),
         cap_mesh: g.cap.map(|m| meshes.add(m)),
+        cell: g.cell,
         center_local: g.center_local,
         half_extents: g.half_extents,
     })
@@ -164,10 +182,10 @@ fn bake_detached(
     material: Option<Handle<StandardMaterial>>,
     meshes: &mut Assets<Mesh>,
 ) -> Option<DetachedChunk> {
-    let frag = build_fragment(part, meshes)?;
+    let g = geometry_from_soup(part)?;
     let material = material?;
-    let mesh = frag.outer_mesh.or(frag.cap_mesh)?;
-    Some(DetachedChunk { mesh, material, center_local: frag.center_local, half_extents: frag.half_extents })
+    let mesh = g.outer.or(g.cap).map(|m| meshes.add(m))?;
+    Some(DetachedChunk { mesh, material, center_local: g.center_local, half_extents: g.half_extents })
 }
 
 /// Once a subject's whole scene has streamed in, bake its fracture set (and its detached chunk)
@@ -178,14 +196,14 @@ pub fn bake_fractures(
     mut cache: ResMut<FractureCache>,
     mut meshes: ResMut<Assets<Mesh>>,
     settings: Res<FractureSettings>,
-    subjects: Query<(&FractureSubject, &Children)>,
+    subjects: Query<(&FractureSubject, &FractureProxy, &Children)>,
     children_q: Query<&Children>,
     transforms: Query<&Transform>,
     mesh_q: Query<&Mesh3d>,
     mat_q: Query<&MeshMaterial3d<StandardMaterial>>,
     is_detached: Query<(), With<DetachedPart>>,
 ) {
-    for (subject, children) in &subjects {
+    for (subject, proxy, children) in &subjects {
         let source = subject.0.id();
         if cache.baked.contains(&source) {
             continue;
@@ -322,15 +340,31 @@ pub fn bake_fractures(
             cache.baked.insert(source);
             continue;
         }
+        // **Refused, not substituted.** Synthesising a bounding box here would fracture a shape the
+        // subject is not, and would do it silently. `baked` is left unset so a caller that adds the
+        // component later still gets a bake.
+        if proxy.0.is_empty() {
+            error!("autogib: {asset_path} has no FractureProxy cells; refusing to bake");
+            continue;
+        }
 
         // Bounding-box-driven sizing: bigger/denser meshes yield more, appropriately-sized pieces.
         let ref_ext = settings.ref_extent.max(1.0e-4);
         let raw = (settings.pieces_base as f32 * (ext / ref_ext)).round() as i32;
         let target = raw.clamp(settings.min_pieces, settings.max_pieces).max(1) as usize;
-        let min_extent = ext * settings.min_fraction;
 
-        let soups = fracture(body, target, min_extent, seed_from_path(&asset_path), None);
-        let frags: Vec<Fragment> = soups.iter().filter_map(|s| build_fragment(s, &mut meshes)).collect();
+        let pieces = fracture(
+            body,
+            &proxy.0,
+            target,
+            settings.min_fraction,
+            seed_from_path(&asset_path),
+            None,
+        );
+        let frags: Vec<Fragment> = pieces
+            .into_iter()
+            .filter_map(|(cell, render)| build_fragment(cell, &render, &mut meshes))
+            .collect();
         info!("autogib: baked {} fragments for {asset_path}", frags.len());
         cache.body.insert(source, frags);
 

@@ -46,8 +46,9 @@ Two runs of the same build on the same asset must produce bit-identical fragment
 
 ## Where the boundary falls
 
-Three things belong to the caller, not here, and each has bitten someone who assumed otherwise:
+Four things belong to the caller, not here, and each has bitten someone who assumed otherwise:
 
+- **The convex decomposition.** This crate cuts a proxy — `ProxyCell` per connected shell — and carries the render triangles along as a payload. Computing that decomposition is not its job: a consumer already running V-HACD or CoACD for colliders has one, and forcing a second, different decomposition would be the fracture disagreeing with the physics about what the object is. A subject with no `FractureProxy` is `error!`-refused rather than given a synthesised bounding box.
 - **Naming the part that detaches.** Finding a weapon node by name is content, not fracture. Tag it `DetachedPart` from your own system, `.before(AutogibSystems)`.
 - **Deciding when the bake may run.** The plugin sets no run condition. Gate `AutogibSystems` on your own state.
 - **Everything after the fragment exists.** Rigid bodies, colliders, launch impulses, pooling, despawn. This crate hands out a mesh, a local centre and a half-extent, and stops.

@@ -263,3 +263,73 @@ sources for `bevy_autogib` and `isomesh`.
 
 **Pinned to a branch rev, and that is temporary.** `ba3b13b` is on `backlog`. When that branch merges,
 re-pin to the merge commit on `main`.
+
+---
+
+## Phase 1 — The architecture
+
+### ☑ AG-001 · Tier A / Tier B split
+
+The crate no longer cuts the triangle soup. `src/proxy.rs` is Tier A: a convex `ProxyCell` and the plane
+cut that divides one into two. `fracture_mesh` takes `&[ProxyCell]`, cuts **only** cells, and carries the
+render triangles as a payload — clipped by the same plane, never capped. The cap is the cell's new face.
+
+**The pre-registered prediction, recorded against the outcome: CONFIRMED.**
+
+| | predicted | measured |
+|---|---|---|
+| proxy fragments closed | 12/12 | **12/12** |
+| manifold | 12/12 | **12/12** |
+| χ = 2 | all | **all** |
+| open cut edges (proxy) | 0 | **0** |
+| volume conserved | 1e-3 | **1e-3** |
+
+`every_proxy_fragment_of_the_two_shell_subject_is_closed` is the test. The soup cutter scored 7/12
+watertight and 2/12 manifold on the same fixture with 22 open cut edges; `AG-012` pinned those numbers
+so this comparison could exist at all.
+
+**The secondary prediction also held, and it is why it was written down in advance:** the *render*
+fragments still carry open edges, and that is correct rather than a regression — a render fragment is a
+surface subset, not a solid. `audit_proxy` is added as the companion to `audit_fragment` so the two
+artefacts can be measured separately, which is the API half of `AG-004`.
+
+> **Deviation, deliberate: a fragment is exactly one cell, not "a set of cells on one side".** Each cut
+> splits one cell in two, so the set never has more than one member. This pays twice — the fragment is
+> trivially closed and convex, and `AG-007` gets a solver-ready collider with no decomposition at spawn.
+> Partial fracture and compounds, which are what the "set" formulation is for, are not something this
+> crate does.
+
+> **Deviation: `min_extent` became `min_fraction`, a *linear* fraction cubed internally.** Cell selection
+> is by **volume** — `Soup::extent`'s sliver pathology would otherwise have been inherited wholesale, so
+> the first half of `AG-011` is delivered here out of necessity. Comparing the caller's 0.15 directly
+> against a volume ratio proved ~4× stricter and silently returned 11 fragments where 12 were asked for;
+> cubing restores what every existing caller meant.
+
+> **Falsified premise, found by measuring rather than reasoning — T-junctions.** With a proxy that is
+> *exactly* the subject's own box, the render skin plus its cap still came back open: 13–19 boundary
+> edges per fragment. The cause is not the architecture but arity. The cap is the cross-section of the
+> **cell**, so it has one vertex per cell edge crossed; the skin's opening is the cross-section of the
+> **triangulated mesh**, so it has one per triangle edge — including the diagonals a quad is split with.
+> Those extra points sit exactly on the cap's edges without being cap vertices.
+>
+> **The obvious fix corrupts the solid, and this was measured too.** Inserting the seam points into the
+> cell's face leaves its neighbouring faces on the coarse edge, moving the T-junction inside the cell:
+> proxy boundary edges 0 → 16, χ 2 → −3. The weave therefore happens at **emit** time only
+> (`weave_seam`), leaving the cell pristine. Open edges fell from 13–19 to 3–9 per fragment. Not
+> eliminated — `convex_ring` dedupes on the `WELD` lattice and drops seam points within 1e-4 of a corner
+> — and deliberately not chased further, because `AG-004` is where the render metric gets its own
+> treatment.
+
+**Deleted, not deprecated** — `CLAUDE.md` forbids the old cutter surviving as a fallback: `cap_side`,
+`assemble_loops`, `cut_segment`, `weld`, `push_cap_tri` and `split_soup` are gone, and with them the
+three `known_defect_` tests that asserted their bugs. Those findings live in this archive and in
+`docs/isomesh-upstream-asks.md`; the code they indicted does not exist to be re-broken.
+
+**Also landed:** `FractureProxy` component (a subject without one is `error!`-refused, never given a
+synthesised box); a fourth entry in `CLAUDE.md`'s "Where the boundary falls"; `README.md`'s wiring
+snippet and "What it deliberately does not do"; all three examples; and `docs/fracture-tier-ab.gif`,
+where every fragment is green.
+
+> **Unlooked-for confirmation.** isomesh's own `T-022` note, found while working `AG-013`, reaches this
+> architecture independently: *"under the Tier A architecture a cap is a plane intersected with a convex
+> cell, which is provably a convex polygon and needs no CDT at all."*

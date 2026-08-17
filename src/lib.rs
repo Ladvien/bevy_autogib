@@ -4,11 +4,16 @@
 mod audit;
 mod bake;
 mod mesh;
+mod proxy;
 mod soup;
 
-pub use audit::{FragmentAudit, audit_fragment, audit_fragments};
-pub use bake::{DetachedChunk, DetachedPart, Fragment, FractureCache, FractureSubject, bake_fractures};
+pub use audit::{FragmentAudit, audit_fragment, audit_fragments, audit_proxy};
+pub use bake::{
+    DetachedChunk, DetachedPart, Fragment, FractureCache, FractureProxy, FractureSubject,
+    bake_fractures,
+};
 pub use mesh::{FragmentGeometry, fracture_mesh};
+pub use proxy::ProxyCell;
 pub use soup::hash_f32;
 
 use bevy::prelude::*;

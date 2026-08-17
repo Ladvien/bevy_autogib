@@ -55,26 +55,36 @@ fn on_death(cache: Res<FractureCache>, subject: &FractureSubject) {
 You do not need an `App` to use the fracture itself. [`fracture_mesh`] is the whole pipeline with no assets and no ECS — meshes in, meshes out:
 
 ```rust
-use bevy::math::{Mat4, primitives::Cuboid};
+use bevy::math::{Mat4, Vec3, primitives::Cuboid};
 use bevy::mesh::Mesh;
+use bevy_autogib::ProxyCell;
 
 let body = Mesh::from(Cuboid::new(1.0, 2.0, 1.0));
+
+// **The proxy is yours.** This crate cuts a convex decomposition and carries your triangles along
+// as a payload — it never cuts the triangle soup. One cell per connected shell; a consumer already
+// running V-HACD or CoACD for colliders has these, and a blocked-out subject can use `from_box`.
+let proxy = vec![ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.5, 1.0, 0.5))];
+
 let pieces = bevy_autogib::fracture_mesh(
     &[(&body, Mat4::IDENTITY)],
+    &proxy,
     12,          // target fragment count
-    0.15,        // stop cutting below this extent
+    0.15,        // stop cutting below this fraction of the subject's size
     0xC0FFEE,    // seed — same seed, same pieces, every run
     None,        // optional impact direction to bias the first cuts
 );
 
 assert!(pieces.len() > 1);
-// Every piece knows where it sat and how big it is, so a collider lines up with the render.
+// Every piece is a closed convex solid — hand `cell` straight to a solver as one convex collider.
 assert!(pieces.iter().all(|p| p.outer.is_some() || p.cap.is_some()));
 ```
 
 ## What it deliberately does not do
 
-**It does not move anything.** No rigid bodies, no velocities, no physics dependency. The bake hands you a mesh, a local centre and a half-extent per piece; spawning them, sizing a collider and throwing them is your game's decision and your solver's job. `examples/explode.rs` integrates its own ballistics in thirty lines to make the point.
+**It does not compute a convex decomposition.** You supply the proxy cells; the crate cuts them. A consumer already running V-HACD or CoACD for colliders has a decomposition, and forcing a second, different one would be the fracture disagreeing with the physics about what the object is. `ProxyCell::from_box` covers a blocked-out subject.
+
+**It does not move anything.** No rigid bodies, no velocities, no physics dependency. The bake hands you a mesh and a convex cell per piece; spawning them, building a collider and throwing them is your game's decision and your solver's job. `examples/explode.rs` integrates its own ballistics in thirty lines to make the point.
 
 **It does not know what died.** No health, no factions, no damage types. It knows an entity carries a [`FractureSubject`] and that some subtree is marked [`DetachedPart`]. What makes a thing break is above this layer.
 

@@ -31,7 +31,7 @@
 //! Run: `cargo run -p bevy_autogib --example explode`
 
 use bevy::prelude::*;
-use bevy_autogib::{fracture_mesh, hash_f32};
+use bevy_autogib::{ProxyCell, fracture_mesh, hash_f32};
 
 /// Target fragment count for one break.
 const TARGET: usize = 18;
@@ -229,9 +229,13 @@ fn break_it(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &DemoMater
     let owned = subject();
     let parts: Vec<(&Mesh, Mat4)> = owned.iter().map(|(m, x)| (m, *x)).collect();
 
+    // One convex cell per shell — the caller's decomposition, matching `subject()` exactly.
+    let proxy = vec![
+        ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.35, 0.55, 0.2)),
+        ProxyCell::from_box(Vec3::new(0.0, 0.74, 0.0), Vec3::splat(0.2)),
+    ];
     let seed = 0x00C0_FFEE_u32.wrapping_add(nth.wrapping_mul(2_654_435_761));
-    let extent = 0.74;
-    let pieces = fracture_mesh(&parts, TARGET, extent * MIN_FRACTION, seed, None);
+    let pieces = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, seed, None);
 
     for (i, piece) in pieces.into_iter().enumerate() {
         // Deterministic per-fragment variation from the crate's own frozen hash — no rand dependency.

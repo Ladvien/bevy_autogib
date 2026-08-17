@@ -3,16 +3,17 @@
 //! No asset types, no ECS, no `App` — this half is pure geometry and unit-tests without any of them.
 //! Everything Bevy-shaped lives one module over, in [`crate::mesh`].
 
-use std::collections::HashMap;
 use std::f32::consts::TAU;
 
 use bevy::log::warn;
 use bevy::math::{Vec2, Vec3};
 
+use crate::proxy::ProxyCell;
+
 /// Classification tolerance: a vertex within `EPS` of the cut plane is treated as lying *on* it, so
 /// slicing near-coincident geometry doesn't spawn zero-area slivers. Positions are in subject-local
 /// units (~1.0 tall for a character), so this is a tight tolerance.
-const EPS: f32 = 1.0e-5;
+pub(crate) const EPS: f32 = 1.0e-5;
 /// Endpoint-weld lattice step for boundary-loop assembly (quantize positions to this grid so cut
 /// segments from adjacent triangles share canonical vertex ids even on non-watertight input).
 ///
@@ -99,14 +100,6 @@ impl Soup {
         }
     }
 
-    /// Vertex-average center. `ZERO` when empty.
-    pub(crate) fn centroid(&self) -> Vec3 {
-        if self.pos.is_empty() {
-            return Vec3::ZERO;
-        }
-        self.pos.iter().copied().sum::<Vec3>() / self.pos.len() as f32
-    }
-
     /// Largest bounding half-dimension — the "how big is this piece" measure driving fragment sizing.
     pub(crate) fn extent(&self) -> f32 {
         let (mn, mx) = self.bbox();
@@ -115,12 +108,12 @@ impl Soup {
 }
 
 /// Signed distance from `p` to the plane (positive on the `+normal` side).
-fn signed_dist(p: Vec3, plane: &Plane) -> f32 {
+pub(crate) fn signed_dist(p: Vec3, plane: &Plane) -> f32 {
     (p - plane.point).dot(plane.normal)
 }
 
 /// `+1` above / `-1` below / `0` on the plane (within `EPS`).
-fn classify(s: f32) -> i32 {
+pub(crate) fn classify(s: f32) -> i32 {
     if s > EPS {
         1
     } else if s < -EPS {
@@ -164,196 +157,12 @@ fn clip_half(v: [Vtx; 3], s: [f32; 3], keep_above: bool, interior: bool, out: &m
     }
 }
 
-/// The single cut segment a straddling triangle contributes to the plane (its entry/exit points).
-/// `None` when the triangle only touches the plane at a point (no real cut).
-fn cut_segment(v: &[Vtx; 3], s: &[f32; 3]) -> Option<[Vec3; 2]> {
-    let mut pts: Vec<Vec3> = Vec::new();
-    let mut add = |p: Vec3| {
-        if !pts.iter().any(|q| q.distance_squared(p) < 1.0e-10) {
-            pts.push(p);
-        }
-    };
-    for i in 0..3 {
-        let j = (i + 1) % 3;
-        let (ci, cj) = (classify(s[i]), classify(s[j]));
-        if ci == 0 {
-            add(v[i].pos);
-        }
-        if ci != 0 && cj != 0 && ci != cj {
-            let t = s[i] / (s[i] - s[j]);
-            add(v[i].pos.lerp(v[j].pos, t));
-        }
-    }
-    if pts.len() == 2 {
-        Some([pts[0], pts[1]])
-    } else {
-        None
-    }
-}
-
 /// Two orthonormal in-plane axes for a given plane normal (for cross-section UVs).
-fn plane_basis(n: Vec3) -> (Vec3, Vec3) {
+pub(crate) fn plane_basis(n: Vec3) -> (Vec3, Vec3) {
     let a = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
     let u = n.cross(a).normalize_or_zero();
     let v = n.cross(u);
     (u, v)
-}
-
-/// Weld a point to a canonical vertex id on the quantized [`WELD`] lattice (robust loop assembly on
-/// non-watertight input).
-fn weld(verts: &mut Vec<Vec3>, table: &mut HashMap<(i64, i64, i64), u32>, p: Vec3) -> u32 {
-    let q = |x: f32| (x / WELD).round() as i64;
-    let key = (q(p.x), q(p.y), q(p.z));
-    if let Some(&id) = table.get(&key) {
-        return id;
-    }
-    let id = verts.len() as u32;
-    verts.push(p);
-    table.insert(key, id);
-    id
-}
-
-/// Chain undirected boundary edges into closed loops. Handles multiple disjoint loops (e.g. a plane
-/// through two legs). Open chains (non-watertight input) are `warn!`-dropped, never emitted.
-fn assemble_loops(edges: &[(u32, u32)]) -> Vec<Vec<u32>> {
-    let mut adj: HashMap<u32, Vec<usize>> = HashMap::new();
-    for (ei, &(a, b)) in edges.iter().enumerate() {
-        adj.entry(a).or_default().push(ei);
-        adj.entry(b).or_default().push(ei);
-    }
-    let mut used = vec![false; edges.len()];
-    let mut loops: Vec<Vec<u32>> = Vec::new();
-
-    for start in 0..edges.len() {
-        if used[start] {
-            continue;
-        }
-        used[start] = true;
-        let (s0, s1) = edges[start];
-        let mut loop_v = vec![s0, s1];
-        let (mut prev, mut cur) = (s0, s1);
-        let mut closed = false;
-
-        for _ in 0..=edges.len() {
-            if cur == s0 {
-                closed = true;
-                break;
-            }
-            // Prefer an unused edge that doesn't immediately backtrack; fall back to any unused edge.
-            let pick = |avoid_prev: bool| -> Option<(usize, u32)> {
-                let eis = adj.get(&cur)?;
-                for &ei in eis {
-                    if used[ei] {
-                        continue;
-                    }
-                    let (a, b) = edges[ei];
-                    let other = if a == cur {
-                        b
-                    } else if b == cur {
-                        a
-                    } else {
-                        continue;
-                    };
-                    if avoid_prev && other == prev {
-                        continue;
-                    }
-                    return Some((ei, other));
-                }
-                None
-            };
-            match pick(true).or_else(|| pick(false)) {
-                Some((ei, other)) => {
-                    used[ei] = true;
-                    loop_v.push(other);
-                    prev = cur;
-                    cur = other;
-                }
-                None => break,
-            }
-        }
-
-        if closed {
-            loops.push(loop_v);
-        } else {
-            warn!("autogib: dropping unclosed cut boundary ({} verts)", loop_v.len());
-        }
-    }
-    loops
-}
-
-/// Fan-triangulate one cap loop around its centroid, giving every cap triangle the `outward` normal
-/// (winding fixed to match) and a planar cross-section UV. Tags triangles `interior = true`.
-#[allow(clippy::too_many_arguments)]
-fn push_cap_tri(out: &mut Soup, c: Vec3, p1: Vec3, p2: Vec3, outward: Vec3, bu: Vec3, bv: Vec3, origin: Vec3) {
-    let face = (p1 - c).cross(p2 - c);
-    if face.length_squared() < 1.0e-12 {
-        return; // skip degenerate fan slice
-    }
-    let (a, b, d) = if face.dot(outward) >= 0.0 { (c, p1, p2) } else { (c, p2, p1) };
-    let uv = |p: Vec3| Vec2::new((p - origin).dot(bu), (p - origin).dot(bv));
-    out.push_tri(
-        Vtx { pos: a, nrm: outward, uv: uv(a) },
-        Vtx { pos: b, nrm: outward, uv: uv(b) },
-        Vtx { pos: d, nrm: outward, uv: uv(d) },
-        true,
-    );
-}
-
-/// Close one side of a cut: weld the recorded segments, assemble boundary loops, fan-cap each with
-/// the given `outward` normal. Needs at least a triangle's worth of segments.
-pub(crate) fn cap_side(segs: &[[Vec3; 2]], plane: &Plane, outward: Vec3, out: &mut Soup) {
-    if segs.len() < 3 {
-        return;
-    }
-    let mut verts: Vec<Vec3> = Vec::new();
-    let mut table: HashMap<(i64, i64, i64), u32> = HashMap::new();
-    let mut edges: Vec<(u32, u32)> = Vec::new();
-    for seg in segs {
-        let ia = weld(&mut verts, &mut table, seg[0]);
-        let ib = weld(&mut verts, &mut table, seg[1]);
-        if ia != ib {
-            edges.push((ia, ib));
-        }
-    }
-    let (bu, bv) = plane_basis(plane.normal);
-    for lp in assemble_loops(&edges) {
-        if lp.len() < 3 {
-            continue;
-        }
-        let c: Vec3 = lp.iter().map(|&i| verts[i as usize]).sum::<Vec3>() / lp.len() as f32;
-        let n = lp.len();
-        for k in 0..n {
-            let p1 = verts[lp[k] as usize];
-            let p2 = verts[lp[(k + 1) % n] as usize];
-            push_cap_tri(out, c, p1, p2, outward, bu, bv, plane.point);
-        }
-    }
-}
-
-/// Split a soup into (above, below) halves by a plane, capping each cut watertight. The cap normals
-/// face *out* of each piece: the above piece's cap faces `-normal`, the below piece's faces `+normal`.
-pub(crate) fn split_soup(src: &Soup, plane: &Plane) -> (Soup, Soup) {
-    let mut above = Soup::default();
-    let mut below = Soup::default();
-    let mut segs: Vec<[Vec3; 2]> = Vec::new();
-
-    for (t, tri) in src.idx.iter().enumerate() {
-        let interior = src.tri_interior[t];
-        let v = [src.vtx(tri[0]), src.vtx(tri[1]), src.vtx(tri[2])];
-        let s = [
-            signed_dist(v[0].pos, plane),
-            signed_dist(v[1].pos, plane),
-            signed_dist(v[2].pos, plane),
-        ];
-        clip_half(v, s, true, interior, &mut above);
-        clip_half(v, s, false, interior, &mut below);
-        if let Some(seg) = cut_segment(&v, &s) {
-            segs.push(seg);
-        }
-    }
-    cap_side(&segs, plane, -plane.normal, &mut above);
-    cap_side(&segs, plane, plane.normal, &mut below);
-    (above, below)
 }
 
 /// Random unit vector on the sphere from a hash seed (always exactly unit length — never zero).
@@ -366,70 +175,127 @@ fn random_dir(seed: u32) -> Vec3 {
     Vec3::new(r * phi.cos(), z, r * phi.sin())
 }
 
-/// Fracture a soup into up to `target` fragments by repeatedly splitting the current largest piece
-/// with a plane through its centroid. `min_extent` stops a piece from being cut below that size.
-/// `seed` drives every plane direction deterministically. `impact_dir`, when set, biases the first
-/// couple of cuts toward the impact (reserved seam for impact-located fracture, cf. Müller 2013).
-pub(crate) fn fracture(src: Soup, target: usize, min_extent: f32, seed: u32, impact_dir: Option<Vec3>) -> Vec<Soup> {
-    let mut pieces: Vec<Soup> = vec![src];
-    let mut unsplittable: Vec<bool> = vec![false];
-    let mut cut_index: u32 = 0;
-    let mut iters = 0usize;
-    let hard_cap = target.saturating_mul(16).saturating_add(32);
+/// **The fracture: Tier A cuts, Tier B rides along.**
+///
+/// Returns one `(cell, render)` pair per fragment. Each cut picks the largest remaining cell by
+/// **volume**, puts a plane through its centroid, splits the cell, and splits that cell's render
+/// payload with the *same* plane — by clipping only, never by capping. The cap is the cell's new face.
+///
+/// # Why volume and not extent
+///
+/// The soup cutter used `Soup::extent`, the largest bounding half-dimension, and that metric has a
+/// standing failure: a flat sliver with one long axis keeps winning "largest piece" and being re-cut
+/// forever, while compact pieces are never touched. Volume has no such degenerate case. This is the
+/// first half of `AG-011`, delivered here because Tier A would otherwise have inherited the bug.
+///
+/// # Why each fragment is exactly one cell
+///
+/// A cut splits one cell into two, so a fragment is always a single convex cell rather than a set of
+/// them. That is a deliberate narrowing of the architecture note, and it pays twice: the fragment is
+/// trivially closed and convex, and `AG-007` gets a solver-ready collider with no decomposition at
+/// spawn. Cells are never unioned across shells, so a head cannot weld itself to a torso.
+pub(crate) fn fracture(
+    render: Soup,
+    proxy: &[ProxyCell],
+    target: usize,
+    min_fraction: f32,
+    seed: u32,
+    impact_dir: Option<Vec3>,
+) -> Vec<(ProxyCell, Soup)> {
+    // Tier B assignment: every triangle goes to the first cell containing its centroid. First, not
+    // nearest — overlapping shells (a head sunk into a torso) are the normal case, and a deterministic
+    // tie-break beats a distance that can flip on a rounding difference.
+    let mut pieces: Vec<(ProxyCell, Soup)> =
+        proxy.iter().map(|c| (c.clone(), Soup::default())).collect();
+    let mut homeless = 0usize;
+    for (t, tri) in render.idx.iter().enumerate() {
+        let (a, b, c) = (render.vtx(tri[0]), render.vtx(tri[1]), render.vtx(tri[2]));
+        let mid = (a.pos + b.pos + c.pos) / 3.0;
+        match pieces.iter().position(|(cell, _)| cell.contains(mid)) {
+            Some(i) => pieces[i].1.push_tri(a, b, c, render.tri_interior[t]),
+            None => homeless += 1,
+        }
+    }
+    if homeless > 0 {
+        warn!(
+            "autogib: {homeless} of {} triangles lie outside every proxy cell and were dropped — the \
+             proxy does not cover the mesh",
+            render.idx.len()
+        );
+    }
 
-    while pieces.len() < target.max(1) {
-        iters += 1;
-        if iters > hard_cap {
+    // **`min_fraction` is a *linear* fraction, cubed here to compare volumes.** Callers think in
+    // sizes — "stop at about 15% of the subject" — and the soup cutter's `min_extent` meant exactly
+    // that. Comparing 0.15 against a volume ratio instead would be roughly four times stricter and
+    // would silently return far fewer fragments than any existing caller asked for.
+    let whole: f32 = pieces.iter().map(|(c, _)| c.volume()).sum();
+    let f = min_fraction.max(0.0);
+    let floor = whole * f * f * f;
+    let mut unsplittable = vec![false; pieces.len()];
+
+    let hard_cap = target * 16 + 32;
+    for cut_index in 0..hard_cap {
+        if pieces.len() >= target.max(1) {
             break;
         }
-        // Largest splittable piece by extent.
-        let pick = pieces
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !unsplittable[*i])
-            // SORT-OK: `pieces` is a Vec built in deterministic order from authored mesh geometry —
-            // no query anywhere. An extent tie (or NaN → Equal) resolves to the last tied index,
-            // which is the same index every run.
-            .max_by(|a, b| a.1.extent().partial_cmp(&b.1.extent()).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i);
-        let Some(i) = pick else {
-            break; // nothing left worth cutting
+        // SORT-OK: `total_cmp` over volumes with the index as tie-break — a total order, so the choice
+        // is a function of the geometry alone and not of the vector's incidental layout.
+        let Some(i) = (0..pieces.len())
+            .filter(|&i| !unsplittable[i])
+            .max_by(|&a, &b| pieces[a].0.volume().total_cmp(&pieces[b].0.volume()).then(b.cmp(&a)))
+        else {
+            break;
         };
-        if pieces[i].extent() < min_extent {
+        if pieces[i].0.volume() < floor {
             unsplittable[i] = true;
             continue;
         }
 
+        // Seed mixing is unchanged from the soup cutter, including the `pieces.len()` term: the plane
+        // sequence is a function of how many fragments exist so far, and changing that would move
+        // every asset this crate has ever fractured.
         let s = seed
-            .wrapping_add(cut_index.wrapping_mul(2_654_435_761))
+            .wrapping_add((cut_index as u32).wrapping_mul(2_654_435_761))
             .wrapping_add(pieces.len() as u32);
         let base_dir = random_dir(s);
         let normal = match impact_dir {
             Some(d) if cut_index < 2 => {
-                let blended = base_dir * 0.5 + d.normalize_or_zero() * 0.5;
-                if blended.length_squared() > 1.0e-6 {
-                    blended.normalize()
-                } else {
-                    base_dir
-                }
+                let blended = (base_dir + d.normalize_or_zero()) * 0.5;
+                if blended.length_squared() > 1.0e-6 { blended.normalize() } else { base_dir }
             }
             _ => base_dir,
         };
-        let plane = Plane { point: pieces[i].centroid(), normal };
+        let plane = Plane { point: pieces[i].0.centroid(), normal };
 
-        let piece = std::mem::take(&mut pieces[i]);
-        let (a, b) = split_soup(&piece, &plane);
-        cut_index = cut_index.wrapping_add(1);
-        if a.is_empty() || b.is_empty() {
-            pieces[i] = piece; // put it back; this plane didn't separate it
+        let (Some(above), Some(below)) = pieces[i].0.clip(&plane) else {
             unsplittable[i] = true;
             continue;
-        }
-        pieces[i] = a;
-        pieces.push(b);
+        };
+        // Tier B: clip only. No `cap_side`, no loop recovery — the cap is `above`/`below`'s new face.
+        let (mut ra, mut rb) = (Soup::default(), Soup::default());
+        split_render(&pieces[i].1, &plane, &mut ra, &mut rb);
+
+        pieces[i] = (above, ra);
+        pieces.push((below, rb));
         unsplittable.push(false);
     }
     pieces
+}
+
+/// Split a render payload by a plane into both half-spaces. **Clipping only** — a render fragment is a
+/// surface subset, not a solid, and giving it a cap here would duplicate the one the cell carries.
+fn split_render(src: &Soup, plane: &Plane, above: &mut Soup, below: &mut Soup) {
+    for (t, tri) in src.idx.iter().enumerate() {
+        let v = [src.vtx(tri[0]), src.vtx(tri[1]), src.vtx(tri[2])];
+        let d = [
+            signed_dist(v[0].pos, plane),
+            signed_dist(v[1].pos, plane),
+            signed_dist(v[2].pos, plane),
+        ];
+        let interior = src.tri_interior[t];
+        clip_half(v, d, true, interior, above);
+        clip_half(v, d, false, interior, below);
+    }
 }
 
 #[cfg(test)]

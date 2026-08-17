@@ -16,7 +16,7 @@
 
 use bevy::math::{Mat4, Vec3, primitives::Cuboid};
 use bevy::mesh::Mesh;
-use bevy_autogib::{FragmentGeometry, fracture_mesh};
+use bevy_autogib::{FragmentGeometry, ProxyCell, fracture_mesh};
 
 /// Target fragment count. The ECS bake derives this from the mesh's bounding size and the
 /// `FractureSettings` dials; here it is spelled out so one number can be varied at a time.
@@ -45,9 +45,18 @@ fn main() {
         (&head, Mat4::from_translation(Vec3::new(0.0, 0.67, 0.0))),
     ];
 
+    // **The proxy — one convex cell per shell, and it is the caller's to supply.** This crate cuts
+    // the proxy, not the triangle soup; see `ProxyCell`. Here the subject is two boxes, so the exact
+    // decomposition is two boxes. A real character hands in V-HACD or CoACD output instead.
+    //
+    // Note the cells are never unioned. That is what keeps the head separable from the torso.
+    let proxy = vec![
+        ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.3, 0.5, 0.175)),
+        ProxyCell::from_box(Vec3::new(0.0, 0.67, 0.0), Vec3::splat(0.17)),
+    ];
+
     let seed = 0x00C0_FFEE;
-    let extent = 0.67; // the merged solid's largest bounding half-dimension
-    let pieces: Vec<FragmentGeometry> = fracture_mesh(&parts, TARGET, extent * MIN_FRACTION, seed, None);
+    let pieces: Vec<FragmentGeometry> = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, seed, None);
 
     println!();
     println!("bevy_autogib — a two-part solid, plane-cut into at most {TARGET} pieces (seed {seed:#010x})");
@@ -120,7 +129,7 @@ fn main() {
     println!("  ─────────────────────────────────────────────────────────────────────────────────");
 
     // Same seed, same pieces — the property the whole crate is built around.
-    let again = fracture_mesh(&parts, TARGET, extent * MIN_FRACTION, seed, None);
+    let again = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, seed, None);
     let identical = again.len() == pieces.len()
         && again
             .iter()

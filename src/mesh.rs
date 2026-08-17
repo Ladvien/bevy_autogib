@@ -11,6 +11,7 @@ use bevy::log::warn;
 use bevy::math::{Mat3, Mat4, Vec2, Vec3};
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 
+use crate::proxy::ProxyCell;
 use crate::soup::{Soup, fracture};
 
 /// Decode a mesh's index buffer into a triangle list, handling all encodings: `U16`, `U32`, and
@@ -164,25 +165,49 @@ fn soup_to_mesh(soup: &Soup, want_interior: bool, recenter: Vec3) -> Option<Mesh
     Some(mesh)
 }
 
-/// One fractured piece as plain meshes, before anything has been handed to an asset arena.
+/// One fractured piece: a convex proxy cell, and the render surface that belongs to it.
 ///
-/// Both meshes are recentered to `center_local` (their shared bounding-box center), so a body placed
-/// at `origin + center_local * scale` with a `half_extents * scale` box collider lines up exactly with
-/// the rendered chunk. Either mesh may be `None`: a fragment with no cut faces has no cap, and a
-/// pure-cap sliver has no outer skin.
+/// **Two tiers, and confusing them is the mistake this type exists to prevent.** [`Self::cell`] is a
+/// *solid* — closed, convex, with a provably valid cut face. [`Self::outer`] is a *surface subset* of
+/// the subject's own mesh, and it is **open by design**: it carries no cap, because the cap is
+/// [`Self::cap`], generated from the cell. Applying a closed-solid test to `outer` is a category error;
+/// see `AG-004`.
+///
+/// Both meshes are recentered to `center_local` (their shared bounding-box center), so a body placed at
+/// `origin + center_local * scale` lines up with the rendered chunk.
 pub struct FragmentGeometry {
-    /// The subject's own surface — whatever material the intact subject wore.
+    /// The subject's own surface — whatever material the intact subject wore. `None` for an interior
+    /// fragment that the render mesh never reached.
     pub outer: Option<Mesh>,
-    /// The cut faces this fracture created, with planar cross-section UVs. Give these the "inside"
+    /// The cut faces, from the proxy cell, with planar cross-section UVs. Give these the "inside"
     /// material (raw meat, splintered wood, fractured stone) — that contrast is the whole read.
     pub cap: Option<Mesh>,
+    /// **The fragment as a solid.** One convex cell, which is precisely what a solver wants: a single
+    /// convex collider, no decomposition at spawn time and no trimesh. See `AG-007`.
+    pub cell: ProxyCell,
     pub center_local: Vec3,
-    /// Half the bounding box per axis, in subject-local units → sizes the chunk's box collider.
+    /// Half the bounding box per axis, in subject-local units.
+    ///
+    /// **A coarse bound, not the collider.** [`Self::cell`] is the collider. This survives for sizing,
+    /// culling and the launch impulses an example computes; a box around a plane-cut shard is a poor
+    /// fit and always was.
     pub half_extents: Vec3,
 }
 
-/// Turn a fragment soup into recentered meshes. `None` if it has no drawable triangles.
-pub(crate) fn geometry_from_soup(soup: &Soup) -> Option<FragmentGeometry> {
+/// Recentred meshes for a soup that was never fractured — the detached part.
+///
+/// **A separate type from [`FragmentGeometry`], deliberately.** A detached part is an *intact chunk*:
+/// nothing cut it, so it has no proxy cell and no cut face, and giving it a synthesised one would be a
+/// second path that only exists to satisfy a struct field.
+pub(crate) struct IntactGeometry {
+    pub(crate) outer: Option<Mesh>,
+    pub(crate) cap: Option<Mesh>,
+    pub(crate) center_local: Vec3,
+    pub(crate) half_extents: Vec3,
+}
+
+/// Turn an un-fractured soup into recentred meshes. `None` if it has no drawable triangles.
+pub(crate) fn geometry_from_soup(soup: &Soup) -> Option<IntactGeometry> {
     if soup.is_empty() {
         return None;
     }
@@ -194,27 +219,119 @@ pub(crate) fn geometry_from_soup(soup: &Soup) -> Option<FragmentGeometry> {
     if outer.is_none() && cap.is_none() {
         return None;
     }
-    Some(FragmentGeometry { outer, cap, center_local: center, half_extents })
+    Some(IntactGeometry { outer, cap, center_local: center, half_extents })
 }
 
-/// **The whole pipeline, with no assets and no ECS.** Merge `parts` into one triangle soup in subject-
-/// local space, recursively plane-cut it into at most `target` pieces, and return each piece as
-/// recentered meshes.
+
+/// A soup as one mesh, ignoring the skin/cap split — for the audit, which measures a whole surface.
+pub(crate) fn soup_to_mesh_all_faces(soup: &Soup) -> Result<Mesh, String> {
+    let (mn, mx) = soup.bbox();
+    soup_to_mesh_all(soup, (mn + mx) * 0.5).ok_or_else(|| "soup has no drawable triangles".to_string())
+}
+
+/// Every triangle of a soup, regardless of its interior tag.
+fn soup_to_mesh_all(soup: &Soup, recenter: Vec3) -> Option<Mesh> {
+    let mut pos = Vec::new();
+    let mut nrm = Vec::new();
+    let mut uv = Vec::new();
+    let mut idx = Vec::new();
+    for tri in &soup.idx {
+        let base = pos.len() as u32;
+        for &v in tri {
+            let v = v as usize;
+            let p = soup.pos[v] - recenter;
+            pos.push([p.x, p.y, p.z]);
+            nrm.push([soup.nrm[v].x, soup.nrm[v].y, soup.nrm[v].z]);
+            uv.push([soup.uv[v].x, soup.uv[v].y]);
+        }
+        idx.extend([base, base + 1, base + 2]);
+    }
+    if idx.is_empty() {
+        return None;
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nrm);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+    mesh.insert_indices(Indices::U32(idx));
+    Some(mesh)
+}
+
+/// The closed solid this fragment is, as one mesh — every proxy face, not just the cut ones.
 ///
-/// Every `Mat4` is that sub-mesh's transform relative to the subject root, so a multi-part character
-/// fractures as one solid rather than as independent limbs. `min_extent` stops a piece being cut below
-/// that size; `seed` drives every plane direction and is the only source of variation. `impact_dir`,
-/// when set, biases the first two cuts toward an impact — a reserved seam, unused by the ECS bake.
+/// Nothing draws this. It exists so the fragment can be *measured*: this is the artefact on which
+/// `χ = 2`, manifoldness and volume conservation are meaningful claims.
+pub(crate) fn proxy_soup(cell: &ProxyCell) -> Soup {
+    let mut s = Soup::default();
+    cell.append_all_faces(&mut s);
+    s
+}
+
+/// Turn one finished piece into recentered meshes. `None` if it draws nothing at all.
+pub(crate) fn geometry_from_piece(cell: ProxyCell, render: &Soup) -> Option<FragmentGeometry> {
+    // The cap comes from the cell, never from the render mesh — that is the architecture in one line.
+    //
+    // The render mesh's boundary vertices are handed along so the cap can weave them into its own ring:
+    // the cap is the cross-section of the *cell* (one vertex per cell edge crossed) while the skin's
+    // opening is the cross-section of the *triangulated mesh* (one per triangle edge, diagonals
+    // included). Without the weave the two meet across T-junctions — flush geometrically, open
+    // topologically, and a hairline crack under some rasterisers.
+    let seam: Vec<Vec3> = render.pos.clone();
+    let mut drawn = render.clone();
+    cell.append_cut_faces(&mut drawn, &seam);
+    if drawn.is_empty() {
+        return None;
+    }
+    let (mn, mx) = drawn.bbox();
+    let center = (mn + mx) * 0.5;
+    let half_extents = ((mx - mn) * 0.5).max(Vec3::splat(0.01));
+    let outer = soup_to_mesh(&drawn, false, center);
+    let cap = soup_to_mesh(&drawn, true, center);
+    if outer.is_none() && cap.is_none() {
+        return None;
+    }
+    Some(FragmentGeometry { outer, cap, cell, center_local: center, half_extents })
+}
+
+/// **The whole pipeline, with no assets and no ECS.** Cut the caller's convex `proxy` into at most
+/// `target` cells, carry the `parts` triangles along as a payload, and return each piece.
 ///
-/// **`parts` order is load-bearing.** The merged soup's vertex order decides the float sums that
-/// produce each cut plane's origin, and float addition is not associative — so two different orders
-/// give fragments that differ in the last bits. Sort `parts` by something authored (an asset path) if
-/// they came from anywhere order is not guaranteed; [`crate::bake`] does exactly that, and the comment
-/// there explains what it cost to learn.
+/// # What changed, and why the signature grew a parameter
+///
+/// This used to cut the triangle soup directly and cap each cut by recovering boundary loops. That is
+/// not how production fracture works and it was not fixable: a plane through a non-convex section
+/// produces a cap no centroid fan can close, and a plane through two shells that merely *touch*
+/// produces a boundary chain with no closure at all. Müller, Chentanez & Kim (`10.1145/2461912.2461934`)
+/// cut a **volumetric convex decomposition** instead and carry the visual triangles as a payload,
+/// because `plane ∩ convex polyhedron = convex polygon` — every cap is then convex by construction and
+/// the fan is provably valid. See [`crate::proxy`].
+///
+/// # The proxy is yours
+///
+/// One [`ProxyCell`] per *connected shell*, convex, covering the mesh. A consumer already running
+/// V-HACD or CoACD for colliders has this; a blocked-out subject can use [`ProxyCell::from_box`]. The
+/// cells are **never unioned** — they are cut independently and fragments keep their cell's provenance,
+/// which is what preserves the ability to separate a head from a torso.
+///
+/// A triangle whose centroid lies in no cell is `warn!`-dropped, loudly and with a count: it means the
+/// proxy does not cover the mesh, which is a fault in the input rather than something to paper over.
+///
+/// # Parameters
+///
+/// Every `Mat4` is that sub-mesh's transform relative to the subject root. `min_fraction` stops a cell
+/// being cut once it drops below that fraction of the subject's *size* — a linear fraction, cubed
+/// internally to compare volumes, so no caller has to compute an extent first. `seed` drives every plane direction and is the only source of
+/// variation. `impact_dir`, when set, biases the first two cuts toward an impact.
+///
+/// **`parts` order is load-bearing.** Cut planes pass through cell centroids, and the render payload's
+/// vertex order decides float sums elsewhere; float addition is not associative, so two different
+/// orders give fragments differing in the last bits. Sort `parts` by something authored (an asset path)
+/// if they came from anywhere order is not guaranteed; [`crate::bake`] does exactly that.
 pub fn fracture_mesh(
     parts: &[(&Mesh, Mat4)],
+    proxy: &[ProxyCell],
     target: usize,
-    min_extent: f32,
+    min_fraction: f32,
     seed: u32,
     impact_dir: Option<Vec3>,
 ) -> Vec<FragmentGeometry> {
@@ -222,12 +339,18 @@ pub fn fracture_mesh(
     for (mesh, xform) in parts {
         append_mesh(&mut soup, mesh, *xform, false);
     }
+    if proxy.is_empty() {
+        warn!("autogib: refusing to fracture — the caller supplied no proxy cells");
+        return Vec::new();
+    }
+    // A proxy with nothing to carry is not a subject. Cutting it would emit cap-only fragments of a
+    // shape the caller never handed us a surface for.
     if soup.is_empty() {
         return Vec::new();
     }
-    fracture(soup, target, min_extent, seed, impact_dir)
-        .iter()
-        .filter_map(geometry_from_soup)
+    fracture(soup, proxy, target, min_fraction, seed, impact_dir)
+        .into_iter()
+        .filter_map(|(cell, render)| geometry_from_piece(cell, &render))
         .collect()
 }
 
@@ -238,7 +361,7 @@ pub fn fracture_mesh(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::soup::{Plane, cap_side, split_soup};
+    use crate::proxy::ProxyCell;
     use bevy::math::primitives::Cuboid;
 
     fn cube_soup() -> Soup {
@@ -263,34 +386,52 @@ mod tests {
             .sum()
     }
 
-    #[test]
-    fn slice_cube_axis_plane() {
-        let s = cube_soup();
-        let (above, below) = split_soup(&s, &Plane { point: Vec3::ZERO, normal: Vec3::X });
-        assert!(!above.is_empty() && !below.is_empty());
-        assert!(above.pos.iter().all(|p| p.x >= -1.0e-3), "above stays on +X side");
-        assert!(below.pos.iter().all(|p| p.x <= 1.0e-3), "below stays on -X side");
-        assert!(above.tri_interior.iter().any(|&i| i), "above has a cap");
-        assert!(below.tri_interior.iter().any(|&i| i), "below has a cap");
-        assert!(all_finite(&above) && all_finite(&below));
+    fn cube_proxy() -> Vec<ProxyCell> {
+        vec![ProxyCell::from_box(Vec3::ZERO, Vec3::splat(0.5))]
     }
 
+    /// A cut leaves each half on its own side, and the cap comes from the **cell**, not from loop
+    /// recovery over the render mesh.
+    #[test]
+    fn slice_cube_axis_plane() {
+        let (cube, _) = (Mesh::from(Cuboid::new(1.0, 1.0, 1.0)), ());
+        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), 2, 0.05, 7, None);
+        assert_eq!(pieces.len(), 2, "one cut should give two pieces");
+        for p in &pieces {
+            assert!(p.cap.is_some(), "every piece of a cut carries a cap face");
+            assert!(p.half_extents.is_finite(), "half extents went non-finite");
+            assert!(p.center_local.is_finite(), "centre went non-finite");
+        }
+    }
+
+    /// A mid-slice of the unit cube exposes a 1×1 cross-section — and under Tier A that area comes out
+    /// exact, because the section is a convex polygon rather than a recovered loop.
     #[test]
     fn cap_is_unit_square_area() {
-        let s = cube_soup();
-        let (above, _) = split_soup(&s, &Plane { point: Vec3::ZERO, normal: Vec3::Y });
-        // A mid-slice of the unit cube leaves a 1x1 cross-section.
-        assert!((interior_area(&above) - 1.0).abs() < 0.05, "cap area ~1.0, got {}", interior_area(&above));
+        let cell = ProxyCell::from_box(Vec3::ZERO, Vec3::splat(0.5));
+        let (above, _) = cell.clip(&crate::soup::Plane { point: Vec3::ZERO, normal: Vec3::Y });
+        let mut cap = Soup::default();
+        above.expect("the cube cuts").append_cut_faces(&mut cap, &[]);
+        assert!(
+            (interior_area(&cap) - 1.0).abs() < 1.0e-4,
+            "cap area should be exactly 1.0, got {}",
+            interior_area(&cap)
+        );
     }
 
     #[test]
     fn fracture_reaches_target_and_is_deterministic() {
-        let a = fracture(cube_soup(), 8, 0.05, 0xABCD_1234, None);
-        let b = fracture(cube_soup(), 8, 0.05, 0xABCD_1234, None);
+        let proxy = cube_proxy();
+        let a = fracture(cube_soup(), &proxy, 8, 0.05, 0xABCD_1234, None);
+        let b = fracture(cube_soup(), &proxy, 8, 0.05, 0xABCD_1234, None);
         assert_eq!(a.len(), b.len());
         assert!(a.len() >= 2 && a.len() <= 8, "reached a sane fragment count: {}", a.len());
-        assert!(a.iter().all(|s| !s.is_empty()));
-        assert!(a[0].centroid().distance(b[0].centroid()) < 1.0e-6, "deterministic per seed");
+        assert!(a.iter().all(|(_, s)| !s.is_empty()), "every piece kept some render surface");
+        assert!(
+            a[0].0.centroid().distance(b[0].0.centroid()) < 1.0e-6,
+            "deterministic per seed"
+        );
+        assert!(all_finite(&a[0].1), "render payload went non-finite");
     }
 
     #[test]
@@ -316,26 +457,32 @@ mod tests {
         assert!(s.nrm.iter().all(|n| n.z.abs() > 0.99));
     }
 
-    #[test]
-    fn open_boundary_is_dropped() {
-        // Path a-b-c-d (open, never returns to a) → no cap emitted, no panic.
-        let (a, b, c, d) = (Vec3::ZERO, Vec3::X, Vec3::new(1.0, 1.0, 0.0), Vec3::new(0.0, 2.0, 0.0));
-        let segs = vec![[a, b], [b, c], [c, d]];
-        let mut out = Soup::default();
-        cap_side(&segs, &Plane { point: Vec3::ZERO, normal: Vec3::Z }, Vec3::Z, &mut out);
-        assert!(out.is_empty());
-    }
-
+    /// A plane that misses the cell leaves it whole and the driver does not spin on it.
     #[test]
     fn degenerate_plane_leaves_piece_whole() {
-        let s = cube_soup();
-        // Plane far outside the cube (all vertices on one side).
-        let (above, below) = split_soup(&s, &Plane { point: Vec3::splat(5.0), normal: Vec3::X });
-        assert!(above.is_empty(), "nothing above a plane past the cube");
-        assert!(!below.is_empty());
-        // And the fracture driver must not spin on such a piece.
-        let out = fracture(cube_soup(), 4, 0.6, 42, None);
+        let cell = ProxyCell::from_box(Vec3::ZERO, Vec3::splat(0.5));
+        let (above, below) =
+            cell.clip(&crate::soup::Plane { point: Vec3::splat(5.0), normal: Vec3::X });
+        assert!(above.is_none(), "nothing above a plane past the cube");
+        assert!(below.is_some(), "the whole cell lies below it");
+        // A `min_fraction` so large nothing may be cut must terminate, not loop to the hard cap.
+        let out = fracture(cube_soup(), &cube_proxy(), 4, 0.6, 42, None);
         assert!(!out.is_empty());
+    }
+
+    /// **A render fragment is open, and that is correct.** It is a surface subset of the subject's own
+    /// mesh; the closed artefact is the proxy cell. Asserting watertightness here would be the category
+    /// error `AG-004` exists to prevent, so this test pins the *shape* of the claim instead.
+    #[test]
+    fn a_render_fragment_carries_no_cap_of_its_own() {
+        let cube = Mesh::from(Cuboid::new(1.0, 1.0, 1.0));
+        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), 4, 0.05, 3, None);
+        assert!(!pieces.is_empty());
+        for p in &pieces {
+            // The cap exists, and every one of its triangles came from the cell's cut faces.
+            assert!(p.cap.is_some(), "the cell supplies a cap for every cut piece");
+            assert!(p.cell.volume() > 0.0, "the cell is a positively oriented solid");
+        }
     }
 
     /// The asset-free entry point is what the examples drive, so it has to hold the same guarantees the
@@ -344,14 +491,16 @@ mod tests {
     fn fracture_mesh_is_deterministic_and_recentered() {
         let cube = Mesh::from(Cuboid::new(1.0, 2.0, 1.0));
         let parts = [(&cube, Mat4::IDENTITY)];
-        let a = fracture_mesh(&parts, 6, 0.1, 0xFEED_BEEF, None);
-        let b = fracture_mesh(&parts, 6, 0.1, 0xFEED_BEEF, None);
+        let proxy = vec![ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.5, 1.0, 0.5))];
+        let a = fracture_mesh(&parts, &proxy, 6, 0.05, 0xFEED_BEEF, None);
+        let b = fracture_mesh(&parts, &proxy, 6, 0.05, 0xFEED_BEEF, None);
 
         assert!(a.len() >= 2, "a 1x2x1 box should break into at least two pieces, got {}", a.len());
         assert_eq!(a.len(), b.len(), "same seed, same fragment count");
         for (x, y) in a.iter().zip(b.iter()) {
             assert_eq!(x.center_local.to_array().map(f32::to_bits), y.center_local.to_array().map(f32::to_bits));
             assert_eq!(x.half_extents.to_array().map(f32::to_bits), y.half_extents.to_array().map(f32::to_bits));
+            assert_eq!(x.cell, y.cell, "the proxy cell itself must be reproducible");
         }
         assert!(a.iter().all(|f| f.outer.is_some() || f.cap.is_some()), "every fragment draws something");
         assert!(a.iter().any(|f| f.cap.is_some()), "cutting a solid must produce cut faces");
@@ -360,6 +509,9 @@ mod tests {
     /// An empty part list is not an error and not a panic — it is simply no fragments.
     #[test]
     fn fracture_mesh_of_nothing_is_empty() {
-        assert!(fracture_mesh(&[], 8, 0.1, 1, None).is_empty());
+        assert!(fracture_mesh(&[], &cube_proxy(), 8, 0.1, 1, None).is_empty());
+        // And no proxy at all is a refusal, not a panic.
+        let cube = Mesh::from(Cuboid::new(1.0, 1.0, 1.0));
+        assert!(fracture_mesh(&[(&cube, Mat4::IDENTITY)], &[], 8, 0.1, 1, None).is_empty());
     }
 }

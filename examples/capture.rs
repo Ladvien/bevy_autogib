@@ -18,9 +18,10 @@
 //! Cut faces keep the dark interior material regardless, because that contrast is what makes a break
 //! read as a break at all. See `explode.rs`.
 //!
-//! On the torso+head subject most fragments come back red today, and that is the honest baseline the
-//! backlog's Phase 1 exists to fix — two closed shells that meet are not a manifold at the seam, so a
-//! plane through it yields a boundary chain the slicer cannot close and drops. Watch that red go away.
+//! The verdict is taken on the **proxy cell** — the artefact that is a solid — never on the render
+//! skin, which is a surface subset and open by construction. Under Tier A every fragment should come
+//! back green: a plane through a convex cell yields two convex cells, with no input for which that can
+//! fail. Magenta here means the cell clipper is wrong, not that the subject was awkward.
 //!
 //! Frames land in `--out <dir>` (default `frames/`) as `frame0000.png`. Turn them into a GIF with:
 //!
@@ -45,7 +46,7 @@ use bevy::{
     window::ExitCondition,
     winit::WinitPlugin,
 };
-use bevy_autogib::{FragmentGeometry, audit_fragment, fracture_mesh, hash_f32};
+use bevy_autogib::{FragmentGeometry, ProxyCell, audit_proxy, fracture_mesh, hash_f32};
 
 /// Capture size. Small enough that 100 PNGs and the GIF built from them stay a reasonable thing to
 /// commit; large enough to see a cut face.
@@ -97,8 +98,13 @@ enum Verdict {
 impl Verdict {
     /// Reduce a fragment to its verdict. An unauditable fragment counts as [`Verdict::Open`] rather
     /// than being hidden — a piece we cannot measure is not a piece we get to call clean.
+    ///
+    /// **This asks [`audit_proxy`], not `audit_fragment`, and the difference is the whole point.** A
+    /// fragment is two artefacts: a closed convex *cell*, and a *subset of the subject's own surface*
+    /// which is open because a surface subset is open. Colouring by the render mesh's watertightness
+    /// paints almost everything magenta and says nothing — it measures the wrong artefact.
     fn of(frag: &FragmentGeometry) -> Self {
-        match audit_fragment(frag) {
+        match audit_proxy(frag) {
             Ok(a) if a.is_closed() && a.is_manifold() => Verdict::Solid,
             Ok(a) if a.is_closed() => Verdict::ClosedNonManifold,
             _ => Verdict::Open,
@@ -284,8 +290,11 @@ fn break_it(app: &mut SubApps) {
 
     let owned = subject();
     let parts: Vec<(&Mesh, Mat4)> = owned.iter().map(|(m, x)| (m, *x)).collect();
-    let extent = 0.74;
-    let pieces = fracture_mesh(&parts, TARGET, extent * MIN_FRACTION, SEED, None);
+    let proxy = vec![
+        ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.35, 0.55, 0.2)),
+        ProxyCell::from_box(Vec3::new(0.0, 0.74, 0.0), Vec3::splat(0.2)),
+    ];
+    let pieces = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, SEED, None);
 
     // Audit first, so the tally can be logged next to the frames it describes.
     let verdicts: Vec<Verdict> = pieces.iter().map(Verdict::of).collect();
