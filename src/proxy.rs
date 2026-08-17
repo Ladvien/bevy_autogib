@@ -116,6 +116,39 @@ impl ProxyCell {
         Self { face_cut: vec![false; faces.len()], verts, faces }
     }
 
+    /// The cell's vertices — **this is the collider.**
+    ///
+    /// Every convex-hull collider constructor in every solver takes a point cloud: parry's
+    /// `ConvexPolyhedron::from_convex_hull`, Rapier's `ColliderBuilder::convex_hull`, Avian's
+    /// `Collider::convex_hull`. Hand them this slice. There is no decomposition to run at spawn time
+    /// and no trimesh to fall back to, because a fragment *is* one convex cell.
+    ///
+    /// That is the payoff Müller's architecture gives twice: the same decomposition that makes the cut
+    /// robust is the one the solver wanted anyway.
+    pub fn points(&self) -> &[Vec3] {
+        &self.verts
+    }
+
+    /// The cell's faces, as rings of indices into [`Self::points`], wound counter-clockwise seen from
+    /// outside.
+    ///
+    /// Polygons, not triangles — see the module docs. A consumer that needs triangles should fan each
+    /// ring from its first vertex, which is valid because the face is convex.
+    pub fn faces(&self) -> impl Iterator<Item = &[u32]> {
+        self.faces.iter().map(|f| f.as_slice())
+    }
+
+    /// Enclosed volume. Useful for mass properties: a solver wanting uniform density needs exactly
+    /// this times the density, and no other part of the fragment describes how much stuff it is.
+    pub fn volume(&self) -> f32 {
+        self.signed_volume()
+    }
+
+    /// The cell's vertex-average centre, in the same subject-local space as the points.
+    pub fn center(&self) -> Vec3 {
+        self.centroid()
+    }
+
     /// Vertex-average centre. The cut planes pass through this, so it is part of the seed chain.
     pub(crate) fn centroid(&self) -> Vec3 {
         if self.verts.is_empty() {
@@ -129,7 +162,7 @@ impl ProxyCell {
     /// Positive for an outward-wound closed cell. Used to pick which cell to cut next — **not** the
     /// bounding half-extent, because a flat sliver with one long axis wins that contest forever
     /// (`AG-011`). Volume has no such failure mode.
-    pub(crate) fn volume(&self) -> f32 {
+    pub(crate) fn signed_volume(&self) -> f32 {
         let mut v6 = 0.0f32;
         for f in &self.faces {
             for i in 1..f.len() - 1 {

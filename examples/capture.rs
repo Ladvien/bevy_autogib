@@ -77,7 +77,7 @@ const ORIGIN: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 struct Chunk {
     velocity: Vec3,
     spin: Vec3,
-    half_y: f32,
+    drop_to_rest: f32,
 }
 
 /// The unbroken subject, before the swap.
@@ -324,6 +324,9 @@ fn break_it(app: &mut SubApps) {
 
     for (i, (piece, verdict)) in pieces.into_iter().zip(verdicts).enumerate() {
         let (velocity, spin) = launch(i, piece.center_local);
+        // The collider a real game builds: `Collider::convex_hull(piece.cell.points())`.
+        let lowest = piece.cell.points().iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let drop_to_rest = (piece.cell.center().y - lowest).max(0.0);
         let skin = skins.iter().find(|(v, _)| *v == verdict).map(|(_, h)| h.clone());
 
         let outer = piece.outer.map(|m| world.resource_mut::<Assets<Mesh>>().add(m));
@@ -331,7 +334,7 @@ fn break_it(app: &mut SubApps) {
 
         let chunk = world
             .spawn((
-                Chunk { velocity, spin, half_y: piece.half_extents.y },
+                Chunk { velocity, spin, drop_to_rest },
                 Transform::from_translation(ORIGIN + piece.center_local),
                 Visibility::default(),
             ))
@@ -375,7 +378,7 @@ fn integrate(mut chunks: Query<(&mut Chunk, &mut Transform)>) {
         transform.rotate_local_y(chunk.spin.y * DT);
         transform.rotate_local_z(chunk.spin.z * DT);
 
-        let floor = chunk.half_y;
+        let floor = chunk.drop_to_rest;
         if transform.translation.y < floor {
             transform.translation.y = floor;
             if chunk.velocity.y < 0.0 {

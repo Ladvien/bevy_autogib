@@ -367,3 +367,24 @@ reads **12 of 12** on watertight, manifold, χ = 2 and collider-ready, enclosing
 
 Both numbers are now printed side by side in the example, so the next reader gets the comparison rather
 than an unqualified claim.
+
+### ☑ AG-007 · Colliders from the proxy
+
+`ProxyCell` gained the accessors a solver actually wants: `points()` (the collider), `faces()`,
+`volume()` (mass properties) and `center()`. Both `Fragment` and `FragmentGeometry` carry the cell.
+
+**`points()` is the whole ticket in one method.** Every convex-hull collider constructor takes a point
+cloud — parry's `ConvexPolyhedron::from_convex_hull`, Rapier's `ColliderBuilder::convex_hull`, Avian's
+`Collider::convex_hull`. A fragment *is* one convex cell, so there is no decomposition to run at spawn
+and no trimesh to fall back to. That is Müller's architecture paying twice: the decomposition that makes
+the cut robust is the one the solver wanted anyway.
+
+`half_extents` survives, documented as **a coarse bound, not the collider**. It still sizes culling and
+the launch impulses an example computes, and removing it would have broken callers for no gain.
+
+Both examples now take their resting height from `cell.points()` rather than `half_extents.y`, with the
+one-line collider a real game would build written in the comment beside it. On a plane-cut shard the
+bounding box and the actual shape differ a lot, and having the example quietly use the box would have
+undercut the ticket it is demonstrating.
+
+**Boundary held:** the crate hands out cells and stops. It still names no solver.

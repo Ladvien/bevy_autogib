@@ -5,7 +5,7 @@
 `docs/research-brief.md` (the open problems), `docs/isomesh-upstream-asks.md` (what we need from the
 validator).
 
-**10 tickets archived, 5 open.** Phase 0 is complete and the Tier A/B cutover has landed. This backlog opens with an architectural change: the crate is going to
+**11 tickets archived, 4 open.** Phase 0 is complete and the Tier A/B cutover has landed. This backlog opens with an architectural change: the crate is going to
 stop cutting the triangle soup.
 
 **Read this before working any ticket below.** This crate is now an independent repository and
@@ -158,7 +158,6 @@ dissolve, and a fix nobody measured beforehand is indistinguishable from a fix t
 | | ID | Ticket | Size | Blocked by |
 |---|---|---|---|---|
 | ☐ | **AG-003** | **Open shells as a separate class.** Capes, hair cards, decals and single-sided sheets have no interior, so they have no proxy cell and must **never be cut and capped** — capping a sheet produces a degenerate solid and the current code will try. Assign each open shell to a fragment by proximity and carry it whole.<br>**Acceptance:** a single-quad "cape" fixture attached to the torso+head fixture survives a fracture intact, attached to exactly one fragment, with no cap triangles generated for it. | M | AG-001 |
-| ☐ | **AG-007** | **Colliders from the proxy.** Drop box-from-half-extents. A fragment is a set of convex cells, which is precisely what a solver wants — one convex collider per cell, no decomposition at spawn time and no trimesh. This is what makes the Müller architecture pay off twice.<br>**Acceptance:** `Fragment` exposes its cells; `half_extents` is either removed or documented as a coarse bound rather than the collider; `examples/explode.rs` uses cells. Keep the crate solver-agnostic — hand out cells, never a rigid body. | M | AG-001 |
 
 ---
 

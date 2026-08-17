@@ -64,8 +64,13 @@ const BROKEN_SECS: f32 = 7.0;
 struct Chunk {
     velocity: Vec3,
     spin: Vec3,
-    /// Half-height, so the piece rests on the ground rather than sinking to its centre.
-    half_y: f32,
+    /// How far the piece's lowest point sits below its centre, **measured from the proxy cell**.
+    ///
+    /// A real game passes `piece.cell.points()` to `Collider::convex_hull` and never computes this at
+    /// all. It is here because this example deliberately has no solver, and it is taken from the cell
+    /// rather than from `half_extents` to make the point: the cell is the shape, the bounding box is a
+    /// bound. On a plane-cut shard those differ a lot.
+    drop_to_rest: f32,
 }
 
 /// The unbroken subject, before the swap.
@@ -255,9 +260,20 @@ fn break_it(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &DemoMater
         let velocity = dir * (3.2 + 2.4 * h4);
         let spin = Vec3::new(h1 - 0.5, h2 - 0.5, h4 - 0.5).normalize_or_zero() * (8.0 + 8.0 * h2);
 
+        // The collider a real game builds, in one line:
+        //     Collider::convex_hull(piece.cell.points())
+        // No decomposition at spawn, no trimesh — a fragment *is* one convex cell.
+        let lowest = piece
+            .cell
+            .points()
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::INFINITY, f32::min);
+        let drop_to_rest = (piece.cell.center().y - lowest).max(0.0);
+
         let chunk = commands
             .spawn((
-                Chunk { velocity, spin, half_y: piece.half_extents.y },
+                Chunk { velocity, spin, drop_to_rest },
                 Transform::from_translation(ORIGIN + piece.center_local),
                 Visibility::default(),
             ))
@@ -290,7 +306,7 @@ fn integrate(time: Res<Time>, mut chunks: Query<(&mut Chunk, &mut Transform)>) {
         transform.rotate_local_z(chunk.spin.z * dt);
 
         // Rest on the floor rather than through it.
-        let floor = chunk.half_y;
+        let floor = chunk.drop_to_rest;
         if transform.translation.y < floor {
             transform.translation.y = floor;
             if chunk.velocity.y < 0.0 {
