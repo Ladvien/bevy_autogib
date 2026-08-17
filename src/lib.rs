@@ -6,6 +6,7 @@ mod bake;
 mod bond;
 mod mesh;
 mod proxy;
+mod severance;
 mod soup;
 mod tree;
 
@@ -17,6 +18,7 @@ pub use bake::{
 };
 pub use mesh::{Fracture, FragmentGeometry, fracture_mesh};
 pub use proxy::ProxyCell;
+pub use severance::{Reach, capsule, directional, radial, spread, swept_triangle};
 pub use soup::hash_f32;
 pub use tree::{FragmentId, FragmentTree, TreeNode};
 

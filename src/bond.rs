@@ -99,6 +99,12 @@ pub struct BondGraph {
     /// Per fragment id, the bonds touching it. Sized to cover every id in the bake, so a fragment
     /// that is not on this graph's frontier simply has no incident bonds.
     incident: Vec<Vec<BondId>>,
+    /// Per fragment id, its cell's centre — `None` for an id off this graph's frontier. Carried
+    /// here so a region query needs nothing but the graph: a blade sweeping between two fragments
+    /// is a question about where those fragments *are*.
+    centers: Vec<Option<Vec3>>,
+    /// The frontier this graph was built over, in ascending id order.
+    members: Vec<FragmentId>,
 }
 
 impl BondGraph {
@@ -190,7 +196,27 @@ impl BondGraph {
                 }
             }
         }
-        BondGraph { bonds, incident }
+
+        let mut centers = vec![None; capacity];
+        for (id, cell) in members {
+            if let Some(slot) = centers.get_mut(id.index()) {
+                *slot = Some(cell.center());
+            }
+        }
+        let mut ids: Vec<FragmentId> = members.iter().map(|(id, _)| *id).collect();
+        ids.sort_unstable();
+        BondGraph { bonds, incident, centers, members: ids }
+    }
+
+    /// The frontier this graph covers, in ascending id order.
+    pub fn members(&self) -> &[FragmentId] {
+        &self.members
+    }
+
+    /// Where a fragment sits — its cell's centre, in subject-local space. `None` for a fragment off
+    /// this graph's frontier.
+    pub fn center(&self, fragment: FragmentId) -> Option<Vec3> {
+        self.centers.get(fragment.index()).copied().flatten()
     }
 
     /// Every bond, in id order.

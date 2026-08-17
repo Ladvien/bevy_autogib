@@ -8,7 +8,7 @@ Runtime mesh fracture: take whatever meshes an entity actually loaded, recursive
 
 That is `examples/explode.rs`, unmodified and at its own 0.4× playback. The subject is intact, then it is its own fragments — the "break" is one despawn and a spawn, because the fracture was computed long before. **The red is not a colour choice, it is the whole idea:** every fragment comes back as two meshes, the subject's original surface and the faces this cut just created, so you can give the inside a different material. Render both with the skin material and the same fragments stop looking broken and start looking disassembled.
 
-> **This repo is a read-only mirror.** It is split out of [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) with `git subtree split`, history intact. Issues and PRs belong upstream.
+> **This repo is the source of truth.** It owns the crate; changes are made here and nowhere else. [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) consumes it as a git dependency pinned to a rev, the same way any other consumer would. It was the other way round — a read-only `git subtree split` mirror — until recently, and that inversion is a known stale-read hazard: a `subtree split` carries only *commits*, so anything living uncommitted in the monorepo working tree could never arrive by that route. If you find a `crates/bevy_autogib/` in a monorepo checkout, it is a corpse.
 
 ## The idea: break the asset once, not the frame
 
@@ -124,6 +124,29 @@ for island in graph.islands(&cache.tree(id).unwrap().leaves(), &broken) {
 
 **Cells that touch without sharing a coplanar face get no bond**, and that is a refusal rather than a gap. It is the normal case between the proxy cells *you* supply — V-HACD and CoACD produce cells that abut without their boundary polygons agreeing — so each root's subtree comes out as its own island unless your decomposition shares faces. Closing that with a proximity heuristic would silently weld a head to a torso, which is the correctness loss the architecture exists to prevent.
 
+## Where the blow landed
+
+Five region queries, each a pure function of the bake plus some geometry. They return a `Reach` — a severity in `[0, 1]` per bond, `1` at full effect falling to `0` at the edge — and *you* decide the threshold at which a bond gives way.
+
+| query | models |
+|---|---|
+| `spread` | a projectile — nearest fragment, then outward **along the bonds**, so a hit takes a connected chunk rather than everything within a sphere |
+| `capsule` | a swung edge — falloff from the segment the blade travelled |
+| `swept_triangle` | a swept blade proper — every bond the swing passed *through* gives way, no falloff |
+| `radial` | a blast — falloff from a point in open space |
+| `directional` | a pull — falloff weighted by how squarely each shared face meets the tear |
+
+```rust,ignore
+let hit = bevy_autogib::spread(graph, impact_point, 0.1, 0.6);
+broken.sever_all(&hit.above(0.5));            // the threshold is yours
+```
+
+Splitting reach from threshold is deliberate: a game scales severity by material, by how much damage the blow carried, or by what a bond has already taken, and all three are facts this crate does not have. Folding a threshold into the query would mean either inventing a damage model here or handing back a decision you could not adjust.
+
+Nothing is named for a weapon. `spread` is not "bullet" and `capsule` is not "sword", because the crate that knows which is which is yours.
+
+**Why runtime and not bake-time**: Müller, Chentanez & Kim put it plainly — with static pre-fracture "there is no way to align fracture patterns with the impact location at run time… When a gamer shoots at a glass window, she expects the spider-web-shaped fracture pattern to be centered around the location where the bullet hit the glass. Anything else clearly destroys the illusion." So the bake stays reproducible and cached, and every blow is a query against it.
+
 ## What it deliberately does not do
 
 **It does not compute a convex decomposition.** You supply the proxy cells; the crate cuts them. A consumer already running V-HACD or CoACD for colliders has a decomposition, and forcing a second, different one would be the fracture disagreeing with the physics about what the object is. `ProxyCell::from_box` covers a blocked-out subject.
@@ -162,6 +185,8 @@ Note what this does *not* claim. Fragment geometry is `f32` arithmetic, so cross
 | `FragmentTree` / `TreeNode` / `FragmentId` | struct | The hierarchy, and the frontier queries that read one bake at any granularity |
 | `BondGraph` / `Bond` / `BondId` | struct | Which fragments share a face, where, and over how much area; `islands()` |
 | `BondSet` | struct | The caller's accumulated damage state — which bonds are severed so far |
+| `spread()` / `capsule()` / `swept_triangle()` / `radial()` / `directional()` | fn | Region queries; each returns a `Reach` |
+| `Reach` | struct | Per-bond severity in `[0,1]`; `above(threshold)` picks what gives way |
 | `fracture_mesh()` / `Fracture` / `FragmentGeometry` | fn | The whole pipeline with no assets and no ECS |
 | `hash_f32()` | fn | The frozen integer hash the fracture seeds from |
 
