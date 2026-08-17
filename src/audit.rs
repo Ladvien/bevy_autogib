@@ -430,6 +430,43 @@ mod tests {
         fracture_mesh(&placed, proxy, 12, 0.15, 0x00C0_FFEE, None)
     }
 
+    /// **AG-005 — the shipped mesh shares vertices, and still keeps its creases.**
+    ///
+    /// Before this, `Soup::push_tri` allocated three fresh vertices per triangle and `soup_to_mesh`'s
+    /// remap keyed on the old soup index — unique per corner by construction — so it compacted the
+    /// buffer and merged nothing. Fragments shipped at exactly 3.0 vertices per triangle.
+    ///
+    /// The two numbers below are a pair, and the gap between them is the point. The **shipped** count
+    /// comes from the composite key (position class + quantised normal + quantised UV). The
+    /// **audit-welded** count comes from a position-only weld, which is what a naive fix would have
+    /// shipped. That the first is materially larger than the second is the crease survivingly intact:
+    /// every vertex in the gap is a corner where the skin meets a cut face, or one cut face meets
+    /// another, and merging it would smear the entire visual read this crate exists to produce.
+    #[test]
+    fn the_shipped_mesh_shares_vertices_without_smearing_creases() {
+        let (parts, proxy) = torso_and_head();
+        let pieces = torso_and_head_fracture(&parts, &proxy);
+        let reports: Vec<_> = pieces.iter().filter_map(|p| audit_render(p).ok()).collect();
+        assert_eq!(reports.len(), 12, "every fragment should be measurable");
+
+        let shipped: u64 = reports.iter().map(|r| r.vertices_before_weld).sum();
+        let position_only: u64 = reports.iter().map(|r| r.vertices_after_weld).sum();
+        let triangles: u64 = reports.iter().map(|r| r.triangles).sum();
+        let per_tri = shipped as f64 / triangles as f64;
+
+        assert!(
+            per_tri < 2.0,
+            "shipped {per_tri:.2} vertices per triangle over {triangles} triangles — the weld merged \
+             little or nothing. It was 3.00 before AG-005; anything at or near 3 means the composite \
+             key stopped matching."
+        );
+        assert!(
+            shipped > position_only,
+            "the composite key merged as hard as a position-only weld ({shipped} vs {position_only}), \
+             which means creases are being smeared — exactly what the normal and UV terms exist to stop"
+        );
+    }
+
     /// **The crate's central promise, tested against every byte.**
     ///
     /// `check_determinism` runs the closure three times — twice into fresh buffers, once into a buffer

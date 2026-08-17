@@ -415,3 +415,34 @@ and the reasoning is recorded at the call site in `bake.rs`.
 > code path that is concurrent in some consumers' builds and not others is precisely what the one-path
 > rule exists to prevent. That argument is now a comment beside the call, where whoever reaches for
 > `spawn` will read it.
+
+### ☑ AG-005 · Attribute-aware weld
+
+`soup_to_mesh` welds on a composite key — **position class + quantised normal + quantised UV**.
+Measured on the torso+head subject: **3.00 → 1.46 vertices per triangle**, a 51% reduction over 341
+triangles. `fracture_output_is_bit_identical_across_runs` stays green and `explode` renders with its
+creases crisp.
+
+The ticket's diagnosis was exactly right: `push_tri` allocates three fresh vertices per triangle and the
+old remap keyed on the *old soup index*, which is unique per corner by construction — so it compacted
+the buffer and merged precisely nothing.
+
+**The two quantisations fail in opposite directions, and that is deliberate.** Position uses a 27-cell
+probe rather than a bare lattice lookup, because two positions a few ULPs apart can straddle a cell
+boundary, and a missed merge there is not a lost saving — the vertices are the *same point*, so leaving
+them apart is what makes a seam. Normal and UV use bare buckets, because a near-miss there costs one
+vertex while a false match smears a crease. Erring toward keeping vertices apart is safe for an
+attribute and unsafe for a position.
+
+**The test asserts a pair, not a number.** Shipped vertices must be under 2.0 per triangle *and*
+strictly greater than what a position-only weld yields. The gap between the two is the crease surviving:
+every vertex in it is a corner where skin meets a cut face, or one cut face meets another. A fix that
+merged as hard as a position weld would pass a naive count assertion and destroy the visual read.
+
+> **Amendment: `isomesh`'s `weld_split_by` was available and deliberately not used.** `AG-013` recorded
+> it landing and this ticket was re-scoped to use it. Doing so would put `isomesh` in the *shipping*
+> path, and `tests/leaf.rs` states the terms it was admitted on: *"a second opinion about the output,
+> not a source of it."* Every emitted vertex would then depend on its welder, and a change there would
+> move geometry this crate promises is reproducible. `MeshBuffer` also carries no UV channel, so the
+> round trip would have had to rebuild UVs through `remap()` regardless. Hand-rolled, with the 27-cell
+> probe that made `Welder` worth citing, and the reasoning recorded on the type.

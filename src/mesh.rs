@@ -123,7 +123,7 @@ fn soup_to_mesh(soup: &Soup, want_interior: bool, recenter: Vec3) -> Option<Mesh
     let mut nrm: Vec<[f32; 3]> = Vec::new();
     let mut uv: Vec<[f32; 2]> = Vec::new();
     let mut idx: Vec<u32> = Vec::new();
-    let mut remap: HashMap<u32, u32> = HashMap::new();
+    let mut weld: AttributeWeld = AttributeWeld::default();
 
     for (t, tri) in soup.idx.iter().enumerate() {
         if soup.tri_interior[t] != want_interior {
@@ -138,20 +138,8 @@ fn soup_to_mesh(soup: &Soup, want_interior: bool, recenter: Vec3) -> Option<Mesh
             continue; // drop zero-area triangles
         }
         for &old in tri {
-            let nid = if let Some(&n) = remap.get(&old) {
-                n
-            } else {
-                let nid = pos.len() as u32;
-                let p = soup.pos[old as usize] - recenter;
-                pos.push([p.x, p.y, p.z]);
-                let n = soup.nrm[old as usize];
-                nrm.push([n.x, n.y, n.z]);
-                let u = soup.uv[old as usize];
-                uv.push([u.x, u.y]);
-                remap.insert(old, nid);
-                nid
-            };
-            idx.push(nid);
+            let v = soup.vtx(old);
+            idx.push(weld.insert(v, recenter, &mut pos, &mut nrm, &mut uv));
         }
     }
     if idx.is_empty() {
@@ -222,6 +210,109 @@ pub(crate) fn geometry_from_soup(soup: &Soup) -> Option<IntactGeometry> {
     Some(IntactGeometry { outer, cap, center_local: center, half_extents })
 }
 
+
+
+/// **The attribute-aware weld.** Merges vertices that are the same *point on the same surface*, and
+/// refuses to merge across a crease.
+///
+/// # Why the old code merged nothing at all
+///
+/// [`Soup::push_tri`] allocates three fresh vertices for every triangle it emits, so a finished
+/// fragment arrives here with `positions.len() == 3 * triangles` and no sharing whatsoever. The remap
+/// this replaces keyed on the *old soup index*, which is unique per corner by construction — so it
+/// compacted the buffer and merged nothing. Fragments shipped at three vertices per triangle.
+///
+/// # Why a bare position weld would be worse than none
+///
+/// The crease between the subject's skin and a raw cut face is the entire visual read this crate
+/// exists to produce, and on a fragment cut more than once there are creases between cut faces of
+/// different planes too. Merging across one averages or discards a normal and smears it. So the key is
+/// composite: **position class + quantised normal + quantised UV**.
+///
+/// # The two quantisations fail in opposite directions, deliberately
+///
+/// **Position** uses a 27-cell probe rather than a bare lattice lookup. Two positions a few ULPs apart
+/// can straddle a lattice boundary and hash to different cells, and here a missed merge on position is
+/// not merely a lost saving — the two vertices are the same point, so leaving them apart is what makes
+/// a seam. Probing the neighbourhood is what `isomesh`'s `Welder` does and why its epsilon is correct.
+///
+/// **Normal and UV** use a bare quantised bucket, and that is the right trade for them. A near-miss
+/// there costs one unmerged vertex; a false *match* would smear a crease. Erring toward keeping
+/// vertices apart is the safe direction for an attribute and the unsafe one for a position.
+///
+/// # Why not `isomesh`'s `weld_split_by`
+///
+/// It exists at the pinned rev and does exactly this shape of thing (`AG-013` recorded it landing).
+/// It is not used because `tests/leaf.rs` states the terms `isomesh` was admitted on: *"a second
+/// opinion about the output, not a source of it."* Welding the shipped mesh with it would make it a
+/// source — every emitted vertex would depend on its welder, and a change there would move geometry
+/// this crate promises is reproducible. `MeshBuffer` also carries no UV channel, so the round trip
+/// would have to rebuild UVs through `remap()` anyway.
+#[derive(Default)]
+struct AttributeWeld {
+    /// Lattice cell → the emitted vertices in it. Small vectors: coincident-vertex counts are single
+    /// digits, so the 27-cell probe stays cheap.
+    cells: HashMap<(i64, i64, i64), Vec<u32>>,
+}
+
+/// Quantisation step for the normal bucket. About one degree at unit length — far finer than any
+/// crease this crate creates, and coarse enough to bucket a shared smooth normal together.
+const NRM_STEP: f32 = 1.0e-2;
+/// Quantisation step for the UV bucket, in the planar cross-section units `push_cap_tri` assigns.
+const UV_STEP: f32 = 1.0e-4;
+
+impl AttributeWeld {
+    fn insert(
+        &mut self,
+        v: crate::soup::Vtx,
+        recenter: Vec3,
+        pos: &mut Vec<[f32; 3]>,
+        nrm: &mut Vec<[f32; 3]>,
+        uv: &mut Vec<[f32; 2]>,
+    ) -> u32 {
+        let p = v.pos - recenter;
+        let q = |x: f32| (x / crate::soup::WELD).round() as i64;
+        let key = (q(p.x), q(p.y), q(p.z));
+        let nk = |x: f32| (x / NRM_STEP).round() as i64;
+        let uk = |x: f32| (x / UV_STEP).round() as i64;
+        let want_n = (nk(v.nrm.x), nk(v.nrm.y), nk(v.nrm.z));
+        let want_uv = (uk(v.uv.x), uk(v.uv.y));
+
+        // The 27-cell probe: a candidate one lattice cell away may still be the same point.
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let Some(ids) = self.cells.get(&(key.0 + dx, key.1 + dy, key.2 + dz)) else {
+                        continue;
+                    };
+                    for &id in ids {
+                        let e = pos[id as usize];
+                        let same_point = (e[0] - p.x).abs() <= crate::soup::WELD
+                            && (e[1] - p.y).abs() <= crate::soup::WELD
+                            && (e[2] - p.z).abs() <= crate::soup::WELD;
+                        if !same_point {
+                            continue;
+                        }
+                        let en = nrm[id as usize];
+                        let eu = uv[id as usize];
+                        if (nk(en[0]), nk(en[1]), nk(en[2])) == want_n
+                            && (uk(eu[0]), uk(eu[1])) == want_uv
+                        {
+                            return id;
+                        }
+                    }
+                }
+            }
+        }
+
+        let id = pos.len() as u32;
+        pos.push([p.x, p.y, p.z]);
+        nrm.push([v.nrm.x, v.nrm.y, v.nrm.z]);
+        uv.push([v.uv.x, v.uv.y]);
+        self.cells.entry(key).or_default().push(id);
+        id
+    }
+}
 
 /// A soup as one mesh, ignoring the skin/cap split — for the audit, which measures a whole surface.
 pub(crate) fn soup_to_mesh_all_faces(soup: &Soup) -> Result<Mesh, String> {
