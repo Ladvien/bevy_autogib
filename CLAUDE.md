@@ -4,11 +4,21 @@ Runtime mesh fracture: take whatever meshes an entity actually loaded, recursive
 
 ## Source of truth
 
-The source of truth for this crate is [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) at `crates/bevy_autogib/`. If you are reading this in a standalone `Ladvien/bevy_autogib` checkout, that is a read-only `git subtree split` mirror — **changes made here cannot be pulled back**. Make them upstream.
+**This repository is the source of truth.** [`Ladvien/bevy_autogib`](https://github.com/Ladvien/bevy_autogib) owns the crate; changes are made here and nowhere else. `foundation_vs_slop` consumes it as a git dependency pinned to a rev, the same way any other consumer would.
+
+**It was the other way round until this branch, and that inversion is a known stale-read hazard.** This repo used to be a read-only `git subtree split` mirror of `foundation_vs_slop/crates/bevy_autogib/`, and a `subtree split` carries only *commits* — so the whole audit harness, the `isomesh` dependency and both research docs, which lived uncommitted in the monorepo working tree, could never arrive by that route. A research agent read the mirror, found no `isomesh` in the manifest, and reported it as fact; the claim was true of what it read and false of the crate. If you find a `crates/bevy_autogib/` in any monorepo checkout, it is a corpse — read this repo instead.
 
 ## Build and test
 
-A leaf — `bevy` with defaults off plus optional `serde` — so it builds and tests on its own: `cargo test -p bevy_autogib`.
+A leaf — `bevy` with defaults off, optional `serde`, and `isomesh` for validation — so it builds and tests on its own, with no `-p` flag and no workspace above it:
+
+```
+cargo test              # 16 unit + leaf.rs + doctests
+cargo build --release   # NOT redundant: see below
+cargo build --examples
+```
+
+**`cargo build --release` is the load-bearing one.** `cargo test` compiles dev-dependencies, and the dev-dependency here is the *full* `bevy` umbrella (the windowed example needs winit and the render pipeline). Cargo unifies features, so under `cargo test` this crate silently gets every `bevy` feature there is and a missing entry in its own `[dependencies]` list cannot fail. That is not hypothetical — `WorldAsset` was reached for while only `bevy_scene` was declared, not `bevy_world_serialization`, and every test passed on a crate that did not build.
 
 ## The non-negotiable: the bake is reproducible, or it does not happen
 
@@ -37,8 +47,9 @@ Two runs of the same build on the same asset must produce bit-identical fragment
 
 ## Where the boundary falls
 
-Three things belong to the caller, not here, and each has bitten someone who assumed otherwise:
+Four things belong to the caller, not here, and each has bitten someone who assumed otherwise:
 
+- **The convex decomposition.** This crate cuts a proxy — `ProxyCell` per connected shell — and carries the render triangles along as a payload. Computing that decomposition is not its job: a consumer already running V-HACD or CoACD for colliders has one, and forcing a second, different decomposition would be the fracture disagreeing with the physics about what the object is. A subject with no `FractureProxy` is `error!`-refused rather than given a synthesised bounding box.
 - **Naming the part that detaches.** Finding a weapon node by name is content, not fracture. Tag it `DetachedPart` from your own system, `.before(AutogibSystems)`.
 - **Deciding when the bake may run.** The plugin sets no run condition. Gate `AutogibSystems` on your own state.
 - **Everything after the fragment exists.** Rigid bodies, colliders, launch impulses, pooling, despawn. This crate hands out a mesh, a local centre and a half-extent, and stops.

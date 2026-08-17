@@ -30,13 +30,27 @@
 //!
 //! Run: `cargo run -p bevy_autogib --example explode`
 
+use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
-use bevy_autogib::{fracture_mesh, hash_f32};
+use bevy_autogib::{CutSettings, fracture_mesh, hash_f32};
+
+mod common;
+use common::body;
 
 /// Target fragment count for one break.
 const TARGET: usize = 18;
 /// Stop cutting a piece below this fraction of the whole solid's extent.
 const MIN_FRACTION: f32 = 0.12;
+/// How many cuts deep the hierarchy may go — slack enough here that `TARGET` is what binds.
+const MAX_DEPTH: u16 = 64;
+
+/// The geometry dials for this example's bake. `plane_jitter` and `size_spread` are what keep the
+/// pieces from all coming out the same size — at `0.0` each cut halves its piece through the centre
+/// and the result reads as uniform shards rather than debris.
+fn cut(seed: u32) -> CutSettings {
+    CutSettings { max_depth: MAX_DEPTH, ..CutSettings::new(TARGET, MIN_FRACTION, seed) }
+}
+
 /// Downward acceleration, m/s². Exaggerated — gibs read better when they fall fast.
 const GRAVITY: f32 = 18.0;
 /// How much speed survives a bounce off the ground plane.
@@ -64,8 +78,13 @@ const BROKEN_SECS: f32 = 7.0;
 struct Chunk {
     velocity: Vec3,
     spin: Vec3,
-    /// Half-height, so the piece rests on the ground rather than sinking to its centre.
-    half_y: f32,
+    /// How far the piece's lowest point sits below its centre, **measured from the proxy cell**.
+    ///
+    /// A real game passes `piece.cell.points()` to `Collider::convex_hull` and never computes this at
+    /// all. It is here because this example deliberately has no solver, and it is taken from the cell
+    /// rather than from `half_extents` to make the point: the cell is the shape, the bounding box is a
+    /// bound. On a plane-cut shard those differ a lot.
+    drop_to_rest: f32,
 }
 
 /// The unbroken subject, before the swap.
@@ -115,20 +134,6 @@ fn main() {
         .run();
 }
 
-/// The two shells the subject is made of, each with its transform relative to the subject root —
-/// the same `(&Mesh, Mat4)` pairs the ECS bake assembles by walking a scene's children.
-fn subject() -> [(Mesh, Mat4); 2] {
-    [
-        (Mesh::from(Cuboid::new(0.7, 1.1, 0.4)), Mat4::IDENTITY),
-        (
-            Mesh::from(Cuboid::new(0.4, 0.4, 0.4)),
-            Mat4::from_translation(Vec3::new(0.0, 0.74, 0.0)),
-        ),
-    ]
-}
-
-/// Where the subject stands: feet on the floor.
-const ORIGIN: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 
 fn setup_scene(
     mut commands: Commands,
@@ -137,8 +142,15 @@ fn setup_scene(
 ) {
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(3.4, 2.2, 4.6).looking_at(Vec3::new(0.0, 0.9, 0.0), Vec3::Y),
+        Transform::from_xyz(2.25, 1.35, 2.95).looking_at(Vec3::new(0.0, 0.76, 0.0), Vec3::Y),
     ));
+    // A fill light, so an unlit cut face reads as shadowed rather than as a hole. See
+    // `common::light_and_floor`, where the same thing is done for the recorders.
+    commands.insert_resource(GlobalAmbientLight {
+        color: Color::srgb(0.62, 0.66, 0.78),
+        brightness: 900.0,
+        ..default()
+    });
     commands.spawn((
         // 0.19 spells this `shadow_maps_enabled`; it was `shadows_enabled` in earlier releases.
         DirectionalLight { illuminance: 9_000.0, shadow_maps_enabled: true, ..default() },
@@ -161,8 +173,8 @@ fn setup_scene(
             ..default()
         }),
         interior: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.52, 0.09, 0.08),
-            perceptual_roughness: 0.55,
+            base_color: Color::srgb(0.46, 0.07, 0.07),
+            perceptual_roughness: 0.42,
             ..default()
         }),
     };
@@ -172,12 +184,12 @@ fn setup_scene(
 
 /// The subject before anything happens to it — one entity per shell, the skin material on both.
 fn spawn_intact(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &DemoMaterials) {
-    for (mesh, xform) in subject() {
+    for (mesh, xform) in body::subject() {
         commands.spawn((
             Intact,
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(mats.skin.clone()),
-            Transform::from_matrix(Mat4::from_translation(ORIGIN) * xform),
+            Transform::from_matrix(Mat4::from_translation(body::ORIGIN) * xform),
         ));
     }
 }
@@ -226,12 +238,12 @@ fn drive_cycle(
 /// Fracture the subject and spawn every piece. This is the function a game's death handler replaces:
 /// same loop, but each chunk gets a real rigid body and collider instead of a [`Chunk`].
 fn break_it(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &DemoMaterials, nth: u32) {
-    let owned = subject();
+    let owned = body::subject();
     let parts: Vec<(&Mesh, Mat4)> = owned.iter().map(|(m, x)| (m, *x)).collect();
 
+    // One convex cell per shell — the caller's decomposition, matching `subject()` exactly.
     let seed = 0x00C0_FFEE_u32.wrapping_add(nth.wrapping_mul(2_654_435_761));
-    let extent = 0.74;
-    let pieces = fracture_mesh(&parts, TARGET, extent * MIN_FRACTION, seed, None);
+    let pieces = fracture_mesh(&parts, &body::proxy(), &cut(seed)).into_leaves();
 
     for (i, piece) in pieces.into_iter().enumerate() {
         // Deterministic per-fragment variation from the crate's own frozen hash — no rand dependency.
@@ -248,13 +260,29 @@ fn break_it(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &DemoMater
         let angle = h1 * std::f32::consts::TAU;
         let jitter = Vec3::new(angle.cos(), 0.0, angle.sin()) * 0.5;
         let dir = (outward + jitter + Vec3::Y * (0.6 + 0.8 * h3)).normalize_or_zero();
-        let velocity = dir * (3.2 + 2.4 * h4);
-        let spin = Vec3::new(h1 - 0.5, h2 - 0.5, h4 - 0.5).normalize_or_zero() * (8.0 + 8.0 * h2);
+        // **Scaled by mass, and that is most of what separates gibs from shrapnel.** Throwing every
+        // piece at one speed leaves a severed limb and a splinter at identical velocity, which reads
+        // as an explosion in a quarry. A blow delivers an impulse, so light pieces should leave fast
+        // and heavy ones should barely move and flop.
+        let heft = body::heft(piece.cell.volume());
+        let velocity = dir * (3.2 + 2.4 * h4) * heft;
+        let spin = Vec3::new(h1 - 0.5, h2 - 0.5, h4 - 0.5).normalize_or_zero() * (8.0 + 8.0 * h2) * heft;
+
+        // The collider a real game builds, in one line:
+        //     Collider::convex_hull(piece.cell.points())
+        // No decomposition at spawn, no trimesh — a fragment *is* one convex cell.
+        let lowest = piece
+            .cell
+            .points()
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::INFINITY, f32::min);
+        let drop_to_rest = (piece.cell.center().y - lowest).max(0.0);
 
         let chunk = commands
             .spawn((
-                Chunk { velocity, spin, half_y: piece.half_extents.y },
-                Transform::from_translation(ORIGIN + piece.center_local),
+                Chunk { velocity, spin, drop_to_rest },
+                Transform::from_translation(body::ORIGIN + piece.center_local),
                 Visibility::default(),
             ))
             .id();
@@ -286,7 +314,7 @@ fn integrate(time: Res<Time>, mut chunks: Query<(&mut Chunk, &mut Transform)>) {
         transform.rotate_local_z(chunk.spin.z * dt);
 
         // Rest on the floor rather than through it.
-        let floor = chunk.half_y;
+        let floor = chunk.drop_to_rest;
         if transform.translation.y < floor {
             transform.translation.y = floor;
             if chunk.velocity.y < 0.0 {
