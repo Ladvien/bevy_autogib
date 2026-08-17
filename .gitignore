@@ -1,0 +1,5 @@
+/target
+**/*.rs.bk
+
+# Serena's per-project cache. A tool's index of this repo, not part of it.
+/.serena

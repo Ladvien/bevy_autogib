@@ -4,11 +4,17 @@
 
 Runtime mesh fracture: take whatever meshes an entity actually loaded, recursively plane-cut them into watertight-capped chunks, bake that once per source asset, and swap the pieces in when the thing dies.
 
-![A blue two-part solid standing intact, then bursting into tumbling fragments whose cut faces are raw red while their outer surfaces stay blue](docs/explode.gif)
+![A blue two-part figure standing; a projectile takes the top off its head, another takes a piece off its shoulder, a slash cleaves its chest, a blade sweeps through its middle and a blast scatters what is left — the raw red interior showing on every cut face](docs/sever.gif)
+
+That is `examples/sever.rs`, recorded headless. The subject stays standing between blows and what comes off depends on where you hit it — a projectile takes a chunk, a blade cleaves, a blast finishes it. **[See all four examples →](docs/DEMOS.md)**
+
+The other half is the whole-subject burst, which is the shape a death actually wants:
+
+![The same figure standing intact, then bursting into tumbling fragments whose cut faces are raw red while their outer surfaces stay blue](docs/explode.gif)
 
 That is `examples/explode.rs`, unmodified and at its own 0.4× playback. The subject is intact, then it is its own fragments — the "break" is one despawn and a spawn, because the fracture was computed long before. **The red is not a colour choice, it is the whole idea:** every fragment comes back as two meshes, the subject's original surface and the faces this cut just created, so you can give the inside a different material. Render both with the skin material and the same fragments stop looking broken and start looking disassembled.
 
-> **This repo is a read-only mirror.** It is split out of [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) with `git subtree split`, history intact. Issues and PRs belong upstream.
+> **This repo is the source of truth.** It owns the crate; changes are made here and nowhere else. [`Ladvien/foundation_vs_slop`](https://github.com/Ladvien/foundation_vs_slop) consumes it as a git dependency pinned to a rev, the same way any other consumer would. It was the other way round — a read-only `git subtree split` mirror — until recently, and that inversion is a known stale-read hazard: a `subtree split` carries only *commits*, so anything living uncommitted in the monorepo working tree could never arrive by that route. If you find a `crates/bevy_autogib/` in a monorepo checkout, it is a corpse.
 
 ## The idea: break the asset once, not the frame
 
@@ -45,9 +51,13 @@ fn spawn_enemy(mut commands: Commands, assets: Res<AssetServer>) {
 
 // Later, at the moment of death — the launch is yours, and so is the solver.
 fn on_death(cache: Res<FractureCache>, subject: &FractureSubject) {
-    let Some(fragments) = cache.fragments(subject.0.id()) else { return };
-    for frag in fragments {
+    // One bake, read back at whatever granularity this death deserves. `leaves` is the finest;
+    // `frontier_of(3)` is the same cached bake as three big chunks.
+    for frag in cache.leaves(subject.0.id()) {
         let _ = (&frag.outer_mesh, &frag.cap_mesh, frag.center_local, frag.half_extents);
+    }
+    for frag in cache.frontier_of(subject.0.id(), 3) {
+        let _ = frag.id;
     }
 }
 ```
@@ -55,26 +65,100 @@ fn on_death(cache: Res<FractureCache>, subject: &FractureSubject) {
 You do not need an `App` to use the fracture itself. [`fracture_mesh`] is the whole pipeline with no assets and no ECS — meshes in, meshes out:
 
 ```rust
-use bevy::math::{Mat4, primitives::Cuboid};
+use bevy::math::{Mat4, Vec3, primitives::Cuboid};
 use bevy::mesh::Mesh;
+use bevy_autogib::ProxyCell;
 
 let body = Mesh::from(Cuboid::new(1.0, 2.0, 1.0));
-let pieces = bevy_autogib::fracture_mesh(
-    &[(&body, Mat4::IDENTITY)],
-    12,          // target fragment count
-    0.15,        // stop cutting below this extent
-    0xC0FFEE,    // seed — same seed, same pieces, every run
-    None,        // optional impact direction to bias the first cuts
-);
 
+// **The proxy is yours.** This crate cuts a convex decomposition and carries your triangles along
+// as a payload — it never cuts the triangle soup. One cell per connected shell; a consumer already
+// running V-HACD or CoACD for colliders has these, and a blocked-out subject can use `from_box`.
+let proxy = vec![ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.5, 1.0, 0.5))];
+
+// `CutSettings::new` takes the three dials every caller has an opinion about and fills in the
+// shape defaults; `plane_jitter` and `size_spread` are what stop every piece coming out the
+// same size. Assign to them to change how the break reads.
+let cut = bevy_autogib::CutSettings::new(
+    12,          // finest fragment count
+    0.15,        // stop cutting below this fraction of the subject's size
+    0xC0FFEE,    // seed — same seed, same pieces, every run
+);
+let baked = bevy_autogib::fracture_mesh(&[(&body, Mat4::IDENTITY)], &proxy, &cut);
+
+// **One bake, every granularity.** The cut loop keeps each piece it split, so the same bake
+// answers "three pieces" and "all of them" without cutting twice.
+assert_eq!(baked.frontier_of(3).len(), 3);
+let pieces = baked.leaves();
 assert!(pieces.len() > 1);
-// Every piece knows where it sat and how big it is, so a collider lines up with the render.
+// Every piece is a closed convex solid — hand `cell` straight to a solver as one convex collider.
 assert!(pieces.iter().all(|p| p.outer.is_some() || p.cap.is_some()));
 ```
 
+## One bake, every granularity
+
+A bake does not produce *a* fragment set. It produces the whole binary forest it cut through — one tree per proxy cell — and any **frontier** of that forest is a valid decomposition that tiles the subject exactly once. Three big chunks for a cleaving blow and forty for a blast come from the same cached bake, read at two depths.
+
+This is nearly free, because the cut loop already computed it. Each cut splits one piece into two, so the piece set after *k* cuts *is* the `cells + k` piece decomposition; the loop used to overwrite the parent and throw that away. Keeping it costs no extra geometry work — only the memory of the parents' payloads, which `FractureSettings::max_depth` bounds. Measured on the torso-and-head fixture: ~1.4 ms → ~2.2 ms, tracking node count (23 built instead of 12).
+
+The reason to want this is the reason Müller, Chentanez & Kim give for rejecting static pre-fracture in the first place — "the number of hierarchical fracture levels is fixed" — and it is the shape PhysX Blast (chunk depth) and Unreal's Chaos (per-level damage thresholds) both arrived at independently.
+
+```rust,ignore
+cache.leaves(id)              // finest — what the cache handed out before the hierarchy
+cache.frontier_of(id, 3)      // the same bake as three pieces
+cache.at_depth(id, 2)         // every branch cut to the same level
+cache.tree(id)                // the topology itself: parents, children, depths
+```
+
+Frontiers may be **mixed-depth** — that is the point, and it is what a localised break-off needs: the struck arm resolves to its finest pieces while the torso stays a single chunk.
+
+## Which fragments touch which
+
+Nesting and neighbouring are different questions. `BondGraph` answers the second: for each pair of fragments that share a face, where that face is, which way it points, and how large it is. That is what lets one piece come off while the rest stays standing.
+
+The match is **exact**, by Müller's coplanar-face algorithm — sort every face by `|d|` of its plane equation, pair up equal-`|d|` faces with opposing normals, and take the planar convex∩convex overlap for the area. Every cut this crate makes produces exactly that shape, because `clip` hands the same cut ring to both halves.
+
+```rust,ignore
+let graph = cache.bonds(id).expect("baked");
+let mut broken = BondSet::new(graph);      // the caller owns the damage state
+broken.sever_all(graph.incident(hit));     // whatever your game decided to sever
+for island in graph.islands(&cache.tree(id).unwrap().leaves(), &broken) {
+    // one island per still-connected group. Spawn the ones that came loose.
+}
+```
+
+`islands` is stateless on purpose: hit it again, sever more bonds, call it again. Progressive destruction is that set growing, and keeping it on your side is what lets this work without the crate ever learning what health is.
+
+**Cells that touch without sharing a coplanar face get no bond**, and that is a refusal rather than a gap. It is the normal case between the proxy cells *you* supply — V-HACD and CoACD produce cells that abut without their boundary polygons agreeing — so each root's subtree comes out as its own island unless your decomposition shares faces. Closing that with a proximity heuristic would silently weld a head to a torso, which is the correctness loss the architecture exists to prevent.
+
+## Where the blow landed
+
+Five region queries, each a pure function of the bake plus some geometry. They return a `Reach` — a severity in `[0, 1]` per bond, `1` at full effect falling to `0` at the edge — and *you* decide the threshold at which a bond gives way.
+
+| query | models |
+|---|---|
+| `spread` | a projectile — nearest fragment, then outward **along the bonds**, so a hit takes a connected chunk rather than everything within a sphere |
+| `capsule` | a swung edge — falloff from the segment the blade travelled |
+| `swept_triangle` | a swept blade proper — every bond the swing passed *through* gives way, no falloff |
+| `radial` | a blast — falloff from a point in open space |
+| `directional` | a pull — falloff weighted by how squarely each shared face meets the tear |
+
+```rust,ignore
+let hit = bevy_autogib::spread(graph, impact_point, 0.1, 0.6);
+broken.sever_all(&hit.above(0.5));            // the threshold is yours
+```
+
+Splitting reach from threshold is deliberate: a game scales severity by material, by how much damage the blow carried, or by what a bond has already taken, and all three are facts this crate does not have. Folding a threshold into the query would mean either inventing a damage model here or handing back a decision you could not adjust.
+
+Nothing is named for a weapon. `spread` is not "bullet" and `capsule` is not "sword", because the crate that knows which is which is yours.
+
+**Why runtime and not bake-time**: Müller, Chentanez & Kim put it plainly — with static pre-fracture "there is no way to align fracture patterns with the impact location at run time… When a gamer shoots at a glass window, she expects the spider-web-shaped fracture pattern to be centered around the location where the bullet hit the glass. Anything else clearly destroys the illusion." So the bake stays reproducible and cached, and every blow is a query against it.
+
 ## What it deliberately does not do
 
-**It does not move anything.** No rigid bodies, no velocities, no physics dependency. The bake hands you a mesh, a local centre and a half-extent per piece; spawning them, sizing a collider and throwing them is your game's decision and your solver's job. `examples/explode.rs` integrates its own ballistics in thirty lines to make the point.
+**It does not compute a convex decomposition.** You supply the proxy cells; the crate cuts them. A consumer already running V-HACD or CoACD for colliders has a decomposition, and forcing a second, different one would be the fracture disagreeing with the physics about what the object is. `ProxyCell::from_box` covers a blocked-out subject.
+
+**It does not move anything.** No rigid bodies, no velocities, no physics dependency. The bake hands you a mesh and a convex cell per piece; spawning them, building a collider and throwing them is your game's decision and your solver's job. `examples/explode.rs` integrates its own ballistics in thirty lines to make the point.
 
 **It does not know what died.** No health, no factions, no damage types. It knows an entity carries a [`FractureSubject`] and that some subtree is marked [`DetachedPart`]. What makes a thing break is above this layer.
 
@@ -102,10 +186,16 @@ Note what this does *not* claim. Fragment geometry is `f32` arithmetic, so cross
 | `AutogibSystems` | `SystemSet` | On `Update`. Gate it and order against it |
 | `FractureSubject(Handle<WorldAsset>)` | `Component` | What to break; the cache key and the seed source |
 | `DetachedPart` | `Component` | Subtree pruned out and baked as one intact chunk |
-| `FractureSettings` | `Resource` | Five bake dials; `init_resource`d, so yours wins if inserted first |
-| `FractureCache` | `Resource` | `fragments()`, `detached_chunk()`, `is_baked()` |
+| `FractureSettings` | `Resource` | Eight bake dials; `init_resource`d, so yours wins if inserted first |
+| `CutSettings` | struct | The geometry dials for one bake, without the ECS sizing policy |
+| `FractureCache` | `Resource` | `leaves()`, `frontier_of()`, `at_depth()`, `tree()`, `fragments()`, `detached_chunk()`, `is_baked()` |
 | `Fragment` / `DetachedChunk` | struct | Mesh handles + `center_local` + `half_extents` |
-| `fracture_mesh()` / `FragmentGeometry` | fn | The whole pipeline with no assets and no ECS |
+| `FragmentTree` / `TreeNode` / `FragmentId` | struct | The hierarchy, and the frontier queries that read one bake at any granularity |
+| `BondGraph` / `Bond` / `BondId` | struct | Which fragments share a face, where, and over how much area; `islands()` |
+| `BondSet` | struct | The caller's accumulated damage state — which bonds are severed so far |
+| `spread()` / `capsule()` / `swept_triangle()` / `radial()` / `directional()` | fn | Region queries; each returns a `Reach` |
+| `Reach` | struct | Per-bond severity in `[0,1]`; `above(threshold)` picks what gives way |
+| `fracture_mesh()` / `Fracture` / `FragmentGeometry` | fn | The whole pipeline with no assets and no ECS |
 | `hash_f32()` | fn | The frozen integer hash the fracture seeds from |
 
 `bake_fractures` is public so it can be named in an ordering constraint, but prefer the set.
@@ -118,10 +208,17 @@ Note what this does *not* claim. Fragment geometry is `f32` arithmetic, so cross
 
 ## Examples
 
+**[docs/DEMOS.md](docs/DEMOS.md) has all four with recordings**, what each is for, and how to regenerate the clips.
+
 ```sh
-cargo run -p bevy_autogib --example fracture_cube   # terminal only — no window, no GPU
-cargo run -p bevy_autogib --example explode         # needs a GPU
+cargo run --release --example fracture_cube   # terminal only — no window, no GPU
+cargo run --release --example sever           # needs a GPU
+cargo run --release --example explode         # needs a GPU
 ```
+
+`sever` is the one to look at if you came here for gameplay-driven fracture. The subject stays standing and you take pieces off it: aim with the arrow keys, then `1`–`5` for a projectile, a slash, a swept blade, a blast or a pull; `G` cycles which frontier of the same bake is standing, `R` resets. Hit it again and it comes apart further.
+
+`explode` is the other half — the whole-subject burst, which is the right shape for a death and the wrong shape for everything else.
 
 `fracture_cube` drives `fracture_mesh` on a two-part solid and prints the resulting pieces as a table — sizes, triangle counts, and how much of each piece is newly-cut face. It is the fastest way to see what a settings change does.
 

@@ -31,6 +31,33 @@ bevy = { version = "0.19.0", default-features = false, features = [
 # fragment counts. Optional because a caller that builds `FractureSettings` in code needs none of it.
 serde = { version = "1.0", features = ["derive"], optional = true }
 
+# **The mesh validator.** This crate could always cut a mesh; it could never say whether what came out
+# was closed, manifold or consistently wound — `examples/fracture_cube.rs` says so in as many words.
+# `isomesh` is what answers that, and it is an unusually cheap thing to admit: `no_std`, exactly one
+# dependency of its own (`libm`), and **no math library in its public API** — every signature is
+# `[f32; 3]`, so it cannot collide with the `glam` version Bevy 0.19 pins. That last property is why
+# this is a dependency at all rather than a vendored copy.
+#
+# **Pinned to a `rev`, and that is not caution — it is the same rule as `hash_f32`.** isomesh is under
+# active development in a sibling repo. An unpinned dependency whose welder or validator moved between
+# builds would move this crate's *reported* topology between builds, which is the same class of bug
+# `seed_from_path` and the canonical soup order exist to prevent. Bump it deliberately, in a commit that
+# re-blesses the locked topology counts, or not at all.
+#
+# **Bumped once, `4369e3c` → `22c3b35` (AG-013), and here is what that cost and bought.** Cost: one
+# re-blessed number. `supports_inside_outside` gained a `non_manifold_vertices == 0` clause, so the
+# torso+head baseline's collider-ready count went 4 → 1. That is a *correction*, not a regression — the
+# old policy let a bowtie vertex through, and ten of those twelve fragments have one. No emitted
+# geometry moved, and it cannot: the fracture is `soup.rs` and this dependency only ever measures it.
+# Bought: `weld_split_by` (the composite-key weld AG-005 was scoped to hand-roll), and `predicates`
+# with `orient2d`/`incircle` — Shewchuk's robust predicates, which is the floor AG-008's CDT stands on.
+# Still `no_std` with `libm` as its only dependency, so the leaf property is unchanged.
+#
+# **Pin to a rev that is pushed.** The sibling working copy's `HEAD` was 229 commits past `4369e3c` and
+# *unpublished*; a git dependency cannot resolve a commit that exists on one machine. `22c3b35` is
+# `origin/main`.
+isomesh = { git = "https://github.com/Ladvien/isomesh", rev = "22c3b35", default-features = false }
+
 # **Examples only.** The crate's own `bevy` above is trimmed to what a bake needs. A runnable example
 # additionally needs a window, an event loop (winit) and the 3D render pipeline, so it takes the full
 # umbrella here, where it cannot reach a consumer's dependency graph. `tests/leaf.rs` reads

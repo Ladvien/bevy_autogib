@@ -31,12 +31,22 @@
 //! Run: `cargo run -p bevy_autogib --example explode`
 
 use bevy::prelude::*;
-use bevy_autogib::{fracture_mesh, hash_f32};
+use bevy_autogib::{CutSettings, ProxyCell, fracture_mesh, hash_f32};
 
 /// Target fragment count for one break.
 const TARGET: usize = 18;
 /// Stop cutting a piece below this fraction of the whole solid's extent.
 const MIN_FRACTION: f32 = 0.12;
+/// How many cuts deep the hierarchy may go — slack enough here that `TARGET` is what binds.
+const MAX_DEPTH: u16 = 64;
+
+/// The geometry dials for this example's bake. `plane_jitter` and `size_spread` are what keep the
+/// pieces from all coming out the same size — at `0.0` each cut halves its piece through the centre
+/// and the result reads as uniform shards rather than debris.
+fn cut(seed: u32) -> CutSettings {
+    CutSettings { max_depth: MAX_DEPTH, ..CutSettings::new(TARGET, MIN_FRACTION, seed) }
+}
+
 /// Downward acceleration, m/s². Exaggerated — gibs read better when they fall fast.
 const GRAVITY: f32 = 18.0;
 /// How much speed survives a bounce off the ground plane.
@@ -64,8 +74,13 @@ const BROKEN_SECS: f32 = 7.0;
 struct Chunk {
     velocity: Vec3,
     spin: Vec3,
-    /// Half-height, so the piece rests on the ground rather than sinking to its centre.
-    half_y: f32,
+    /// How far the piece's lowest point sits below its centre, **measured from the proxy cell**.
+    ///
+    /// A real game passes `piece.cell.points()` to `Collider::convex_hull` and never computes this at
+    /// all. It is here because this example deliberately has no solver, and it is taken from the cell
+    /// rather than from `half_extents` to make the point: the cell is the shape, the bounding box is a
+    /// bound. On a plane-cut shard those differ a lot.
+    drop_to_rest: f32,
 }
 
 /// The unbroken subject, before the swap.
@@ -229,9 +244,13 @@ fn break_it(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &DemoMater
     let owned = subject();
     let parts: Vec<(&Mesh, Mat4)> = owned.iter().map(|(m, x)| (m, *x)).collect();
 
+    // One convex cell per shell — the caller's decomposition, matching `subject()` exactly.
+    let proxy = vec![
+        ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.35, 0.55, 0.2)),
+        ProxyCell::from_box(Vec3::new(0.0, 0.74, 0.0), Vec3::splat(0.2)),
+    ];
     let seed = 0x00C0_FFEE_u32.wrapping_add(nth.wrapping_mul(2_654_435_761));
-    let extent = 0.74;
-    let pieces = fracture_mesh(&parts, TARGET, extent * MIN_FRACTION, seed, None);
+    let pieces = fracture_mesh(&parts, &proxy, &cut(seed)).into_leaves();
 
     for (i, piece) in pieces.into_iter().enumerate() {
         // Deterministic per-fragment variation from the crate's own frozen hash — no rand dependency.
@@ -251,9 +270,20 @@ fn break_it(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &DemoMater
         let velocity = dir * (3.2 + 2.4 * h4);
         let spin = Vec3::new(h1 - 0.5, h2 - 0.5, h4 - 0.5).normalize_or_zero() * (8.0 + 8.0 * h2);
 
+        // The collider a real game builds, in one line:
+        //     Collider::convex_hull(piece.cell.points())
+        // No decomposition at spawn, no trimesh — a fragment *is* one convex cell.
+        let lowest = piece
+            .cell
+            .points()
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::INFINITY, f32::min);
+        let drop_to_rest = (piece.cell.center().y - lowest).max(0.0);
+
         let chunk = commands
             .spawn((
-                Chunk { velocity, spin, half_y: piece.half_extents.y },
+                Chunk { velocity, spin, drop_to_rest },
                 Transform::from_translation(ORIGIN + piece.center_local),
                 Visibility::default(),
             ))
@@ -286,7 +316,7 @@ fn integrate(time: Res<Time>, mut chunks: Query<(&mut Chunk, &mut Transform)>) {
         transform.rotate_local_z(chunk.spin.z * dt);
 
         // Rest on the floor rather than through it.
-        let floor = chunk.half_y;
+        let floor = chunk.drop_to_rest;
         if transform.translation.y < floor {
             transform.translation.y = floor;
             if chunk.velocity.y < 0.0 {

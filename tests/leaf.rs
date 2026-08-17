@@ -20,8 +20,18 @@
 
 use std::path::{Path, PathBuf};
 
-/// Everything `bevy_autogib` is allowed to depend on. An engine and a serializer, nothing else.
-const ALLOWED_DEPS: &[&str] = &["bevy", "serde"];
+/// Everything `bevy_autogib` is allowed to depend on. An engine, a serializer, and a mesh validator.
+///
+/// **`isomesh` was added deliberately, and this comment is the review the assertion below asks for.**
+/// It buys the one thing this crate could never do for itself — say whether a fragment is closed,
+/// manifold and consistently wound — and it is admitted on terms that keep the boundary meaningful: it
+/// is `no_std`, it has exactly one dependency of its own (`libm`), and **its public API is `[f32; 3]`
+/// rather than any math library's vector type**, so it cannot drag a second `glam` into a consumer's
+/// tree. A crate that pinned `glam` would have been refused on that ground alone, however good it was.
+///
+/// Note what it is *not*: a geometry backend this crate cannot work without. The fracture is still
+/// `soup.rs` and owes `isomesh` nothing — it is a second opinion about the output, not a source of it.
+const ALLOWED_DEPS: &[&str] = &["bevy", "serde", "isomesh"];
 
 /// Names that would mean the boundary has been crossed. The first three are crates; the rest are
 /// identifiers from the game this was extracted from, checked as substrings because re-introducing one
