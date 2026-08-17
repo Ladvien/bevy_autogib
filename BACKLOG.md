@@ -5,19 +5,25 @@
 `docs/research-brief.md` (the open problems), `docs/isomesh-upstream-asks.md` (what we need from the
 validator).
 
-**15 tickets archived, 0 open.** The backlog is clear. Phase 0 is complete and the Tier A/B cutover has landed. This backlog opens with an architectural change: the crate is going to
-stop cutting the triangle soup.
+**15 tickets archived, 0 open.** The architectural change this backlog opened with has landed: the
+crate no longer cuts the triangle soup. It cuts a caller-supplied convex proxy and carries the render
+triangles along as a payload.
 
-**Read this before working any ticket below.** This crate is now an independent repository and
+**What survives here is the reasoning, not a work queue.** The sections below — the architecture
+argument, and the two corrections carried in from research — are kept because they explain *why* the
+crate is shaped as it is, and because both corrections turned out to need corrections of their own.
+Every ticket, with what it cost and what it falsified, is in `BACKLOG_ARCHIVE.md`.
+
+**One piece of history worth keeping at the top.** This crate is now an independent repository and
 `foundation_vs_slop` consumes it as a pinned git dependency — the reverse of the arrangement most of
-these tickets were written under. Everything the tickets call "Stage 1" (the audit harness, the
-`isomesh` dependency, both research docs, this file) had **never been committed anywhere**; it lived
-untracked in the monorepo working tree, which is why nine of the original eleven tickets named files
-that did not exist in the published crate. See `BACKLOG_ARCHIVE.md`, A-1.
+these tickets were written under. Everything they called "Stage 1" (the audit harness, the `isomesh`
+dependency, both research docs, this file) had **never been committed anywhere**; it lived untracked in
+the monorepo working tree, which is why nine of the original eleven tickets named files that did not
+exist in the published crate. See `BACKLOG_ARCHIVE.md`, A-1.
 
 ---
 
-## How to work this backlog
+## How this backlog was worked
 
 1. Take the **topmost unblocked, unchecked ticket**. The order encodes dependencies.
 2. One ticket = one commit (or a short stack). Commit message starts with the ticket ID.
@@ -129,41 +135,34 @@ capability* should be independently verified before anything depends on them.
 
 ---
 
-## Phase A — Independence
+## The backlog is clear
 
-The crate stands on its own now. These are here for the record and because AG-009 is the half of it that
-reaches into another repository.
+All fifteen tickets are in `BACKLOG_ARCHIVE.md`, each with what it cost and what it falsified. Six
+predictions were pre-registered; **five came back different from what was predicted**, and those
+differences are the most useful thing this backlog produced:
 
-| | ID | Ticket | Size | Blocked by |
-|---|---|---|---|---|
-| ☑ | **A-1** | **Port Stage 1 into this repository, verbatim.** Archived — see `BACKLOG_ARCHIVE.md`. | S | — |
-| ☑ | **A-2** | **A way to see the defect, not just count it.** Archived — see `BACKLOG_ARCHIVE.md`. | S | — |
-| ☑ | **A-3** | **Invert `CLAUDE.md`'s "Source of truth".** This repository is authoritative; the monorepo consumes it as a pinned git dependency. Keep the stale-read hazard on the record, re-pointed at the monorepo copy. | S | A-1 |
-| ☑ | **A-4** | **Make this file honest about all of the above.** Header, definition of done (no `-p` flag), both "corrections carried in from research" — one of which had itself gone stale — plus AG-009 rewritten, AG-012 and AG-013 added, and three wrong anchors fixed. | S | A-1 |
+| ticket | prediction | outcome |
+|---|---|---|
+| AG-001 | 12/12 proxy fragments closed, manifold, χ = 2, 0 open cut edges | **confirmed exactly** |
+| AG-002 | χ and manifoldness conserved; only volume notices a filled bore | **falsified** — χ moves, orientation moves, volume is the field that *misses* it |
+| AG-006 | fold ⟺ inconsistent orientation | **narrowed** — sufficient, not necessary; a doubly-wound fan folds with every counter at zero |
+| AG-013 | falsified if the bump moves geometry | **held** — only a reported number moved, and it was ours being wrong |
+| AG-011 | the async bake runs inline on the main thread | **falsified** — there is no async bake |
+| AG-008 | a CDT is needed as the safety net | **falsified by AG-001** — refuse concave input instead of surviving it |
 
----
+Two false claims were found in this crate's own source (`signed_volume`'s translation invariance, and
+the fold equivalence we had already sent upstream), and one in the backlog's own corrections section.
 
-## Phase 0 — Baseline before the rewrite
+### What is deliberately not here
 
-These run first because they measure the current behaviour. After Phase 1 the defects they capture
-dissolve, and a fix nobody measured beforehand is indistinguishable from a fix that never happened.
-
-| | ID | Ticket | Size | Blocked by |
-|---|---|---|---|---|
-
----
-
-## Phase 1 — The architecture
-
-| | ID | Ticket | Size | Blocked by |
-|---|---|---|---|---|
-
----
-
-## Phase 2 — Safety net and cleanup
-
-| | ID | Ticket | Size | Blocked by |
-|---|---|---|---|---|
+- **A convex decomposition.** The proxy is the caller's; see `CLAUDE.md`'s boundary list.
+- **A constrained Delaunay triangulator.** AG-008 explains why refusing concave cells beats surviving
+  them. Reopen it if a caller genuinely needs concave support; `isomesh`'s `predicates` module is the
+  exact-arithmetic floor it would stand on.
+- **An async bake.** Measured at 0.33 ms; see AG-011.
+- **Full closure of the render mesh.** Open edges fell from 13–19 to 3–9 per fragment with the emit-time
+  seam weave, and the remainder is `convex_ring` deduping seam points within `WELD` of a corner. It is
+  recorded rather than asserted, because a surface subset has a boundary by definition.
 
 ---
 

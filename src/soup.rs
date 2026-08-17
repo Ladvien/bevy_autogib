@@ -219,7 +219,7 @@ fn shells(soup: &Soup) -> Vec<Shell> {
 
     // Union-find over welded vertices; triangles inherit their component from any corner.
     let mut parent: Vec<usize> = (0..vid.len()).collect();
-    fn find(parent: &mut Vec<usize>, mut i: usize) -> usize {
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
         while parent[i] != i {
             parent[i] = parent[parent[i]];
             i = parent[i];

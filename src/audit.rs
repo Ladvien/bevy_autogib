@@ -388,7 +388,6 @@ pub fn audit_proxies(frags: &[FragmentGeometry]) -> Vec<SolidAudit> {
 mod tests {
     use super::*;
     use crate::mesh::fracture_mesh;
-    use crate::mesh::proxy_soup;
     use crate::proxy::ProxyCell;
     use bevy::math::{Mat4, Vec3, primitives::Cuboid};
     use isomesh::validate::check_determinism;
