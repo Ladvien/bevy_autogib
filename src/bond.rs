@@ -89,9 +89,14 @@ pub struct Bond {
 
 /// Which fragments touch which, and over how much surface.
 ///
-/// Built over a **single frontier** of the hierarchy — the finest one, by default — because
-/// adjacency is only meaningful between pieces that coexist. A coarser frontier's adjacency is
-/// derived from this one by [`lift`](Self::lift) rather than rebuilt.
+/// Built over a **single frontier** of the hierarchy, because adjacency is only meaningful between
+/// pieces that coexist: a parent and its own child are not neighbours, they are the same volume
+/// twice. [`crate::Fracture::bonds`] is the graph for the finest frontier; [`BondGraph::of`] builds
+/// one for any other.
+///
+/// **A coarser frontier is not a special case.** Two frontier cells that touch were separated by a
+/// cut at their common ancestor, so the faces they present each other lie exactly on that plane —
+/// the same coplanar match works unchanged, at any depth, including a frontier that mixes depths.
 #[derive(Clone, Debug, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BondGraph {
@@ -110,9 +115,24 @@ pub struct BondGraph {
 impl BondGraph {
     /// **Müller's coplanar-face match** over the given fragments.
     ///
-    /// `members` are the `(id, cell)` pairs of one frontier; `capacity` is the total node count of
-    /// the bake, so ids off this frontier still index into [`incident`](Self::incident) safely.
-    pub(crate) fn build(members: &[(FragmentId, &ProxyCell)], capacity: usize) -> BondGraph {
+    /// `members` are the `(id, cell)` pairs of one frontier — any frontier, of any depth, including
+    /// one that mixes depths. `capacity` is the bake's total node count, so ids off this frontier
+    /// still index into [`incident`](Self::incident) safely; pass [`FragmentTree::len`].
+    ///
+    /// **Reach for this when you spawn something other than the leaves.** [`crate::Fracture::bonds`]
+    /// covers the finest frontier only, and a fragment off a graph's frontier has no incident bonds
+    /// at all — so running [`islands`](Self::islands) for a coarse frontier against the leaf graph
+    /// reports every piece as its own island, and the subject falls apart on the first blow.
+    ///
+    /// ```ignore
+    /// let ids = baked.tree.frontier_of(8);
+    /// let cells: Vec<_> = ids.iter().filter_map(|id| cell_of(*id).map(|c| (*id, c))).collect();
+    /// let graph = BondGraph::of(&cells, baked.tree.len());
+    /// ```
+    ///
+    /// [`BondId`]s are positions in *this* graph, so a [`BondSet`] does not carry across a change of
+    /// frontier — build a fresh one alongside.
+    pub fn of(members: &[(FragmentId, &ProxyCell)], capacity: usize) -> BondGraph {
         // One entry per face of every member: the plane in `n·x + d = 0` form, plus where it came
         // from. `d` is signed; `|d|` is the sort key, because a face and its opposite-facing partner
         // share a plane and therefore share `|d|` while their signs differ.
@@ -485,7 +505,7 @@ mod tests {
         let (above, below) = cell.clip(&Plane { point: Vec3::ZERO, normal: Vec3::Y });
         let (above, below) = (above.expect("cuts"), below.expect("cuts"));
         let members = [(FragmentId(0), &above), (FragmentId(1), &below)];
-        let g = BondGraph::build(&members, 2);
+        let g = BondGraph::of(&members, 2);
 
         assert_eq!(g.len(), 1, "one cut, one bond");
         let b = &g.bonds()[0];
@@ -505,7 +525,7 @@ mod tests {
         let slab = ProxyCell::from_box(Vec3::new(0.0, -0.5, 0.0), Vec3::new(0.5, 0.5, 0.5));
         let post = ProxyCell::from_box(Vec3::new(0.0, 0.2, 0.0), Vec3::new(0.2, 0.2, 0.2));
         let members = [(FragmentId(0), &slab), (FragmentId(1), &post)];
-        let g = BondGraph::build(&members, 2);
+        let g = BondGraph::of(&members, 2);
 
         assert_eq!(g.len(), 1);
         let b = &g.bonds()[0];
@@ -523,7 +543,7 @@ mod tests {
         // And a third that is simply far away.
         let c = ProxyCell::from_box(Vec3::new(9.0, 0.0, 0.0), Vec3::splat(0.5));
         let members = [(FragmentId(0), &a), (FragmentId(1), &b), (FragmentId(2), &c)];
-        assert_eq!(BondGraph::build(&members, 3).len(), 0);
+        assert_eq!(BondGraph::of(&members, 3).len(), 0);
     }
 
     /// The graph a real bake produces: connected, symmetric, and every fragment reachable from every
@@ -534,7 +554,7 @@ mod tests {
         let leaves = tree.leaves();
         let members: Vec<_> =
             leaves.iter().filter_map(|&id| pieces.get(id.index()).map(|p| (id, &p.cell))).collect();
-        let g = BondGraph::build(&members, tree.len());
+        let g = BondGraph::of(&members, tree.len());
 
         assert!(g.len() >= leaves.len() - 1, "a connected graph needs at least n-1 bonds");
         for (i, b) in g.bonds().iter().enumerate() {
@@ -549,6 +569,43 @@ mod tests {
         assert_eq!(g.islands(&leaves, &intact).len(), 1, "nothing broken is one island");
     }
 
+    /// **A coarse frontier is bonded too, and that is not obvious.**
+    ///
+    /// The leaf graph knows nothing about interior nodes, so running `islands` for a coarse frontier
+    /// against it reports every piece as its own island — a subject that falls apart on the first
+    /// blow. Building the graph *for that frontier* is the answer, and it works because two frontier
+    /// cells that touch were separated by a cut at their common ancestor, so the faces they present
+    /// each other are exactly coplanar however deep either one sits.
+    #[test]
+    fn every_frontier_has_its_own_connected_graph() {
+        let (pieces, tree) =
+            fracture(crate::soup::Soup::default(), &unit_cube_cells(), &CutSettings::new(12, 0.03, 0x0FF1_CE));
+        assert!(tree.cuts() >= 6, "need a deep enough bake to have coarse frontiers");
+
+        for want in 2..=tree.leaves().len() {
+            let ids = tree.frontier_of(want);
+            let members: Vec<_> =
+                ids.iter().filter_map(|&id| pieces.get(id.index()).map(|p| (id, &p.cell))).collect();
+            let g = BondGraph::of(&members, tree.len());
+            let islands = g.islands(&ids, &BondSet::new(&g));
+            assert_eq!(
+                islands.len(),
+                1,
+                "the {want}-piece frontier came back as {} islands — it is one solid",
+                islands.len()
+            );
+        }
+
+        // And the leaf graph really is the wrong tool for a coarse frontier, which is why `of` is
+        // public: pinned so the trap stays visible rather than being rediscovered.
+        let leaf_graph = crate::mesh::bond_graph(&pieces, &tree);
+        let coarse = tree.frontier_of(4);
+        assert!(
+            leaf_graph.islands(&coarse, &BondSet::new(&leaf_graph)).len() > 1,
+            "a coarse frontier read against the leaf graph should look disconnected"
+        );
+    }
+
     /// **The localised break, in miniature.** Severing every bond around one fragment detaches that
     /// fragment alone; the rest stays a single connected body.
     #[test]
@@ -557,7 +614,7 @@ mod tests {
         let leaves = tree.leaves();
         let members: Vec<_> =
             leaves.iter().filter_map(|&id| pieces.get(id.index()).map(|p| (id, &p.cell))).collect();
-        let g = BondGraph::build(&members, tree.len());
+        let g = BondGraph::of(&members, tree.len());
 
         // Pick a fragment that is not a cut vertex of the graph, so the remainder stays whole: the
         // one with the fewest bonds is the safest such choice on a convex subdivision.
@@ -586,7 +643,7 @@ mod tests {
         let leaves = tree.leaves();
         let members: Vec<_> =
             leaves.iter().filter_map(|&id| pieces.get(id.index()).map(|p| (id, &p.cell))).collect();
-        let g = BondGraph::build(&members, tree.len());
+        let g = BondGraph::of(&members, tree.len());
 
         let mut broken = BondSet::new(&g);
         let mut last = g.islands(&leaves, &broken).len();

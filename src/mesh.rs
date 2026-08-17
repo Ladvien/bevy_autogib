@@ -487,7 +487,7 @@ pub(crate) fn bond_graph(pieces: &[crate::soup::Piece], tree: &FragmentTree) -> 
         .into_iter()
         .filter_map(|id| pieces.get(id.index()).map(|p| (id, &p.cell)))
         .collect();
-    BondGraph::build(&members, tree.len())
+    BondGraph::of(&members, tree.len())
 }
 
 /// **One bake: every fragment the cut loop produced, plus the hierarchy that says how they nest.**

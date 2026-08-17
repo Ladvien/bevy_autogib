@@ -204,8 +204,13 @@ Note what this does *not* claim. Fragment geometry is `f32` arithmetic, so cross
 
 ```sh
 cargo run -p bevy_autogib --example fracture_cube   # terminal only — no window, no GPU
+cargo run -p bevy_autogib --example sever           # needs a GPU
 cargo run -p bevy_autogib --example explode         # needs a GPU
 ```
+
+`sever` is the one to look at if you came here for gameplay-driven fracture. The subject stays standing and you take pieces off it: aim with the arrow keys, then `1`–`5` for a projectile, a slash, a swept blade, a blast or a pull; `G` cycles which frontier of the same bake is standing, `R` resets. Hit it again and it comes apart further.
+
+`explode` is the other half — the whole-subject burst, which is the right shape for a death and the wrong shape for everything else.
 
 `fracture_cube` drives `fracture_mesh` on a two-part solid and prints the resulting pieces as a table — sizes, triangle counts, and how much of each piece is newly-cut face. It is the fastest way to see what a settings change does.
 

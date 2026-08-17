@@ -5,7 +5,7 @@
 `docs/research-brief.md` (the open problems), `docs/isomesh-upstream-asks.md` (what we need from the
 validator).
 
-**15 tickets archived, 5 landed this phase (AG-015 … AG-019), 0 open.** The architectural change this backlog opened with
+**15 tickets archived, 6 landed this phase (AG-015 … AG-020), 0 open.** The architectural change this backlog opened with
 has landed: the crate no longer cuts the triangle soup. It cuts a caller-supplied convex proxy and
 carries the render triangles along as a payload.
 
@@ -263,6 +263,35 @@ the one thing these dials exist to change. It reads volume now.
 
 **`impact_dir` is gone**, as planned — though it went in AG-015 rather than here, because that ticket
 was already rewriting every call site.
+
+| [x] | **AG-020 — `examples/sever.rs`, and `BondGraph::of`.** The demo the phase exists to produce: the subject stays standing and you take pieces off it. Building it found that the bond graph was leaf-only, so any coarser frontier read as fully disconnected. | M |
+
+### AG-020, as landed
+
+**Two defects, both found by building the thing rather than by reasoning about it.**
+
+**One: adjacency is per frontier, and the crate only shipped the leaf graph.** `Fracture::bonds`
+covers the finest frontier; a fragment off a graph's frontier has no incident bonds at all. So
+standing the subject at `frontier_of(8)` and running `islands` against the leaf graph reported every
+piece as its own island — the granularity dial and localised damage did not compose, and the subject
+would have fallen apart on the first blow. `BondGraph::build` is now public as `BondGraph::of`, and a
+coarse frontier is not a special case: two frontier cells that touch were separated by a cut at their
+common ancestor, so the faces they present each other are exactly coplanar however deep either sits.
+`every_frontier_has_its_own_connected_graph` pins both halves — that every frontier is connected, and
+that reading a coarse one against the leaf graph *does* look disconnected, so the trap stays visible.
+
+**Two: the example's own subject was unbondable.** `explode.rs` puts the head at `y = 0.74`,
+overlapping the torso by a centimetre. That is harmless when the whole subject bursts at once, and
+wrong here — cells that overlap rather than share a plane get no bond, so the head was its own island
+from the start and would drop off at the first blow anywhere. Caught by
+`a_hit_takes_part_of_the_subject_and_leaves_the_rest_standing`, which is a headless replay of what
+the example does on screen. `sever.rs` seats the head at `0.75` so the two cells meet exactly.
+
+**One assertion was written too strong and corrected rather than propped up.** The end-to-end test
+first asserted that a second blow elsewhere must break the subject further. It need not: a fragment
+can lose bonds and still be held on by the ones the region missed, which is the behaviour that makes
+repeated damage read as wearing a thing down instead of as a switch. The test now pins what is
+actually true — a blow never re-joins anything, and a sequence of blows does progress.
 
 > **Weak-axis bias is deliberately deferred.** Choosing each cut normal to minimise cross-section
 > area — a cheap stand-in for Sellán's fracture modes, and what would make a character come apart at

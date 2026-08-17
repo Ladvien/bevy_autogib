@@ -348,8 +348,8 @@ mod tests {
             (0..4).map(|i| ProxyCell::from_box(Vec3::new(i as f32, 0.0, 0.0), Vec3::splat(0.5))).collect();
         let members: Vec<(FragmentId, &ProxyCell)> =
             cells.iter().enumerate().map(|(i, c)| (FragmentId(i as u32), c)).collect();
-        let g = BondGraph::build(&members, 4);
-        let ids = (0..4).map(|i| FragmentId(i)).collect();
+        let g = BondGraph::of(&members, 4);
+        let ids = (0..4).map(FragmentId).collect();
         (g, ids)
     }
 
@@ -516,6 +516,68 @@ mod tests {
         ] {
             assert_eq!(a, b, "a region query must be a pure function of the bake");
         }
+    }
+
+    /// **The whole loop, on the subject the examples actually use.** Bake a torso and a head, stand
+    /// them up, hit one spot, and check that *some but not all* of it comes off and the rest is
+    /// still one connected body. This is what `examples/sever.rs` does on screen, and the thing the
+    /// crate could not express before this phase: the answer used to be all-or-nothing.
+    #[test]
+    fn a_hit_takes_part_of_the_subject_and_leaves_the_rest_standing() {
+        let cells = vec![
+            ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.35, 0.55, 0.2)),
+            ProxyCell::from_box(Vec3::new(0.0, 0.75, 0.0), Vec3::splat(0.2)),
+        ];
+        let (pieces, tree) = fracture(Soup::default(), &cells, &CutSettings::new(34, 0.08, 0x00C0_FFEE));
+        let standing = tree.leaves();
+        let graph = crate::mesh::bond_graph(&pieces, &tree);
+        assert!(standing.len() > 12, "need a fine enough bake to take a small piece off");
+        assert_eq!(
+            graph.islands(&standing, &BondSet::new(&graph)).len(),
+            1,
+            "the subject starts as one body"
+        );
+
+        // A hit up on the head — the crate is not told it is a head, only where the blow landed.
+        let mut broken = BondSet::new(&graph);
+        let hit = spread(&graph, Vec3::new(0.0, 0.82, 0.0), 0.06, 0.34);
+        assert!(!hit.is_empty(), "the blow reached nothing at all");
+        broken.sever_all(&hit.above(0.5));
+
+        let islands = graph.islands(&standing, &broken);
+        assert!(islands.len() >= 2, "something should have come off");
+        let biggest = islands.iter().map(|i| i.len()).max().unwrap_or(0);
+        let off: usize = standing.len() - biggest;
+        assert!(off > 0, "nothing detached");
+        assert!(
+            off < standing.len() / 2,
+            "{off} of {} came off — a localised hit must not take most of the body",
+            standing.len()
+        );
+
+        // The pieces that left are near where it landed, not scattered over the whole subject.
+        let detached: Vec<FragmentId> =
+            islands.iter().filter(|i| i.len() != biggest).flatten().copied().collect();
+        for id in &detached {
+            let Some(c) = graph.center(*id) else { continue };
+            assert!(c.y > 0.2, "fragment {id:?} left from {c:?}, nowhere near a hit at y = 0.82");
+        }
+
+        // **Keep hitting it and it keeps coming apart.** Not every blow detaches something — a
+        // fragment can lose bonds and still be held on by the ones the region missed, which is the
+        // behaviour that makes repeated damage read as wearing a thing down rather than as a switch.
+        // What must hold is that a blow never *re-joins* anything, and that the sequence progresses.
+        let mut count = islands.len();
+        let mut progressed = false;
+        for y in [-0.30f32, 0.0, 0.30, -0.45, 0.45] {
+            broken.sever_all(&spread(&graph, Vec3::new(0.0, y, 0.0), 0.08, 0.45).above(0.5));
+            let now = graph.islands(&standing, &broken).len();
+            assert!(now >= count, "a blow at y = {y} re-joined something: {count} -> {now}");
+            progressed |= now > count;
+            count = now;
+        }
+        assert!(progressed, "five more blows and nothing else came off");
+        assert!(count > islands.len(), "the subject ended up no more broken than after one blow");
     }
 
     /// An empty graph is answered, not crashed into.
