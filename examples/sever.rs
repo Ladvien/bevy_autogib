@@ -17,6 +17,7 @@
 //!   4               a blast        — falloff from a point in open space
 //!   5               a pull         — weighted by how squarely each face meets it
 //!   G               granularity — cycle which frontier of the bake is standing
+//!   T               soften — cycle how hard the drawn fragments are rounded (re-bakes)
 //!   R               reset
 //! ```
 //!
@@ -35,7 +36,7 @@
 use bevy::prelude::*;
 
 mod common;
-use common::body::{self, Blow, BodyMaterials, Chunk, GRANULARITIES, ORIGIN};
+use common::body::{self, Blow, BodyMaterials, Chunk, GRANULARITIES, ORIGIN, SOFTENINGS};
 use common::light_and_floor;
 
 /// Where the next blow lands, in subject-local space.
@@ -50,6 +51,14 @@ struct AimMarker;
 #[derive(Resource)]
 struct Granularity(usize);
 
+/// How hard the drawn fragments are rounded — index into [`SOFTENINGS`].
+///
+/// **On a key because it is worth seeing back to back.** At `0.0` the pieces keep the hard dihedral
+/// edges a plane cut leaves, which is the visual language of ice and cleaved stone however good the
+/// fracture underneath is. Press `T` and the same cuts read as torn instead.
+#[derive(Resource)]
+struct Soften(usize);
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -63,17 +72,19 @@ fn main() {
         }))
         .insert_resource(Aim(Vec3::new(0.0, 0.25, 0.0)))
         .insert_resource(Granularity(GRANULARITIES.len() - 1))
+        .insert_resource(Soften(2))
         .add_systems(Startup, setup)
         .add_systems(Update, (aim_marker, strike, integrate))
         .run();
 }
 
 fn setup(world: &mut World) {
-    let camera = Transform::from_xyz(3.0, 2.0, 4.2).looking_at(Vec3::new(0.0, 0.95, 0.0), Vec3::Y);
+    let camera = Transform::from_xyz(2.25, 1.35, 2.95).looking_at(Vec3::new(0.0, 0.76, 0.0), Vec3::Y);
     world.spawn((Camera3d::default(), camera));
     light_and_floor(world);
 
-    let baked = body::Baked::bake(world);
+    let soften = SOFTENINGS[world.resource::<Soften>().0];
+    let baked = body::Baked::bake(world, soften);
     let materials = BodyMaterials::new(world);
     let granularity = world.resource::<Granularity>().0;
     let damage = body::Damage::fresh(&baked, granularity);
@@ -129,17 +140,41 @@ fn aim_marker(
 fn strike(world: &mut World) {
     let pressed = |world: &World, key: KeyCode| world.resource::<ButtonInput<KeyCode>>().just_pressed(key);
 
-    if pressed(world, KeyCode::KeyR) || pressed(world, KeyCode::KeyG) {
-        if pressed(world, KeyCode::KeyG) {
+    let (reset, coarser, rounder) = (
+        pressed(world, KeyCode::KeyR),
+        pressed(world, KeyCode::KeyG),
+        pressed(world, KeyCode::KeyT),
+    );
+    if reset || coarser || rounder {
+        if coarser {
             let mut g = world.resource_mut::<Granularity>();
             g.0 = (g.0 + 1) % GRANULARITIES.len();
             let now = g.0;
             info!("granularity: standing at {} pieces — same bake, different frontier", GRANULARITIES[now]);
-        } else {
+        }
+        if rounder {
+            let mut t = world.resource_mut::<Soften>();
+            t.0 = (t.0 + 1) % SOFTENINGS.len();
+            let now = t.0;
+            info!(
+                "soften: {:.2} — re-baking, because the rounding is built into the drawn mesh rather \
+                 than applied by a shader. The colliders come out identical either way.",
+                SOFTENINGS[now]
+            );
+        }
+        if reset {
             info!("reset");
         }
         let granularity = world.resource::<Granularity>().0;
         body::clear(world);
+        // **Granularity re-reads one bake; softening needs a new one.** A frontier is a query against
+        // a hierarchy that already exists, but the rounding is applied when the drawn mesh is built,
+        // so changing it means cutting again. Cheap enough at this size to do on a keypress.
+        if rounder {
+            let soften = SOFTENINGS[world.resource::<Soften>().0];
+            let baked = body::Baked::bake(world, soften);
+            world.insert_resource(baked);
+        }
         let damage = {
             let baked = world.resource::<body::Baked>();
             body::Damage::fresh(baked, granularity)

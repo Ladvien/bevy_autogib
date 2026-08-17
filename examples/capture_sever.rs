@@ -16,11 +16,11 @@
 //! | frame | what |
 //! |---|---|
 //! | 0 | intact, all 34 pieces standing |
-//! | 18 | a projectile to the head — one piece leaves, the body stays up |
-//! | 48 | another to the shoulder — it still stays up, which is the whole point |
-//! | 78 | a slash across the chest |
-//! | 110 | a swept blade through the middle, cleaving it |
-//! | 142 | a blast at the base, which finishes it |
+//! | 18 | a projectile to the left shoulder — the arm goes, the body stays up |
+//! | 48 | one to the head |
+//! | 80 | a slash at the right shoulder |
+//! | 112 | a swept blade through the waist, taking the legs |
+//! | 144 | a blast in the chest, which finishes what is left |
 //!
 //! Frames land in `--out <dir>` (default `frames-sever/`). Turn them into a GIF with `tools/gif.sh`.
 //!
@@ -44,13 +44,16 @@ const DT: f32 = 1.0 / 30.0 * 0.55;
 /// The finest frontier: index into [`body::GRANULARITIES`].
 const GRANULARITY: usize = 3;
 
+/// How much to round the drawn fragments. See [`body::SOFTENINGS`] and the `T` key in `sever`.
+const SOFTEN: f32 = 0.5;
+
 /// Where each blow lands and what kind it is. **The whole script.**
 const SCRIPT: [(u32, Blow, Vec3); 5] = [
-    (18, Blow::Projectile, Vec3::new(0.0, 0.82, 0.0)),
-    (48, Blow::Projectile, Vec3::new(0.26, 0.34, 0.0)),
-    (78, Blow::Slash, Vec3::new(0.0, 0.20, 0.0)),
-    (110, Blow::SweptBlade, Vec3::new(0.0, -0.12, 0.0)),
-    (142, Blow::Blast, Vec3::new(0.0, -0.42, 0.0)),
+    (18, Blow::Projectile, Vec3::new(-0.30, 0.16, 0.0)),
+    (48, Blow::Projectile, Vec3::new(0.00, 0.48, 0.0)),
+    (80, Blow::Slash, Vec3::new(0.30, 0.16, 0.0)),
+    (112, Blow::SweptBlade, Vec3::new(0.00, -0.30, 0.0)),
+    (144, Blow::Blast, Vec3::new(0.00, 0.00, 0.0)),
 ];
 
 /// Frames to keep rolling after the last blow so the debris settles.
@@ -58,11 +61,11 @@ const TAIL: u32 = 34;
 
 fn main() {
     let out = arg("--out").unwrap_or_else(|| "frames-sever".to_string());
-    let camera = Transform::from_xyz(3.0, 2.0, 4.2).looking_at(Vec3::new(0.0, 0.95, 0.0), Vec3::Y);
+    let camera = Transform::from_xyz(2.25, 1.35, 2.95).looking_at(Vec3::new(0.0, 0.76, 0.0), Vec3::Y);
     let Some(mut rec) = Recorder::new(WIDTH, HEIGHT, camera, &out) else { return };
 
     light_and_floor(rec.world());
-    let baked = body::Baked::bake(rec.world());
+    let baked = body::Baked::bake(rec.world(), SOFTEN);
     let materials = body::BodyMaterials::new(rec.world());
     let damage = body::Damage::fresh(&baked, GRANULARITY);
     rec.world().insert_resource(baked);

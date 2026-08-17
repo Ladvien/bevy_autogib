@@ -33,13 +33,18 @@
 //! Run: `cargo run --release --example capture -- --out frames`
 
 use bevy::prelude::*;
-use bevy_autogib::{CutSettings, FragmentGeometry, ProxyCell, audit_proxy, fracture_mesh, hash_f32};
+use bevy_autogib::{CutSettings, FragmentGeometry, audit_proxy, fracture_mesh, hash_f32};
 
 mod common;
+use common::body;
 use common::{Recorder, arg, light_and_floor, material};
 
 /// Capture size. Small enough that 100 PNGs and the GIF built from them stay a reasonable thing to
 /// commit; large enough to see a cut face.
+///
+/// Overridable with `--width` / `--height`, because **aspect ratio is not a detail when you are
+/// comparing two clips**: the splash asset is 560x398 and this default is 4:3, so a render at the
+/// default cannot be held up next to it without the crop itself being one of the differences.
 const WIDTH: u32 = 720;
 const HEIGHT: u32 = 540;
 
@@ -66,11 +71,14 @@ const MAX_DEPTH: u16 = 64;
 /// pieces from all coming out the same size — at `0.0` each cut halves its piece through the centre
 /// and the result reads as uniform shards rather than debris.
 fn cut(seed: u32) -> CutSettings {
-    CutSettings { max_depth: MAX_DEPTH, ..CutSettings::new(TARGET, MIN_FRACTION, seed) }
+    let mut c = CutSettings { max_depth: MAX_DEPTH, ..CutSettings::new(TARGET, MIN_FRACTION, seed) };
+    if let Some(s) = arg("--soften").and_then(|v| v.parse::<f32>().ok()) {
+        c.soften = s;
+    }
+    c
 }
 
 const SEED: u32 = 0x00C0_FFEE;
-const ORIGIN: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 
 /// The example's own physics, exactly as `explode` defines it. Not this crate's business.
 #[derive(Component)]
@@ -143,8 +151,22 @@ fn main() {
         }
     };
 
-    let camera = Transform::from_xyz(3.4, 2.2, 4.6).looking_at(Vec3::new(0.0, 0.9, 0.0), Vec3::Y);
-    let Some(mut rec) = Recorder::new(WIDTH, HEIGHT, camera, &out) else { return };
+    let dim = |flag: &str, fallback: u32| -> u32 {
+        match arg(flag).map(|v| v.parse::<u32>()) {
+            Some(Ok(n)) if n > 0 => n,
+            // Refused and named, never silently substituted — the rule the crate applies to a mesh
+            // with no positions.
+            Some(_) => {
+                warn!("capture: {flag} is not a positive integer; using {fallback}");
+                fallback
+            }
+            None => fallback,
+        }
+    };
+    let (width, height) = (dim("--width", WIDTH), dim("--height", HEIGHT));
+
+    let camera = Transform::from_xyz(2.25, 1.35, 2.95).looking_at(Vec3::new(0.0, 0.76, 0.0), Vec3::Y);
+    let Some(mut rec) = Recorder::new(width, height, camera, &out) else { return };
     light_and_floor(rec.world());
     spawn_intact(rec.world());
     rec.warm_up(4);
@@ -173,24 +195,17 @@ enum Tint {
     Demo,
 }
 
-/// The two shells the subject is made of — a torso and a head, the honest non-manifold case.
-fn subject() -> [(Mesh, Mat4); 2] {
-    [
-        (Mesh::from(Cuboid::new(0.7, 1.1, 0.4)), Mat4::IDENTITY),
-        (Mesh::from(Cuboid::new(0.4, 0.4, 0.4)), Mat4::from_translation(Vec3::new(0.0, 0.74, 0.0))),
-    ]
-}
 
 /// The intact subject wears the neutral skin — it has no verdict, because it has not been cut.
 fn spawn_intact(world: &mut World) {
     let skin = material(world, Color::srgb(0.30, 0.42, 0.52), 0.85);
-    for (mesh, xform) in subject() {
+    for (mesh, xform) in body::subject() {
         let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
         world.spawn((
             Intact,
             Mesh3d(mesh),
             MeshMaterial3d(skin.clone()),
-            Transform::from_matrix(Mat4::from_translation(ORIGIN) * xform),
+            Transform::from_matrix(Mat4::from_translation(body::ORIGIN) * xform),
         ));
     }
 }
@@ -204,13 +219,9 @@ fn break_it(rec: &mut Recorder, tint: Tint) {
         world.entity_mut(e).despawn();
     }
 
-    let owned = subject();
+    let owned = body::subject();
     let parts: Vec<(&Mesh, Mat4)> = owned.iter().map(|(m, x)| (m, *x)).collect();
-    let proxy = vec![
-        ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.35, 0.55, 0.2)),
-        ProxyCell::from_box(Vec3::new(0.0, 0.74, 0.0), Vec3::splat(0.2)),
-    ];
-    let pieces = fracture_mesh(&parts, &proxy, &cut(SEED)).into_leaves();
+    let pieces = fracture_mesh(&parts, &body::proxy(), &cut(SEED)).into_leaves();
 
     // Audit first, so the tally can be logged next to the frames it describes.
     let verdicts: Vec<Verdict> = pieces.iter().map(Verdict::of).collect();
@@ -221,7 +232,7 @@ fn break_it(rec: &mut Recorder, tint: Tint) {
 
     // The cut faces keep the raw interior whichever tint is in play: that contrast is what makes a
     // break read as a break, and losing it would make both GIFs worse for no gain.
-    let interior = material(world, Color::srgb(0.30, 0.05, 0.05), 0.55);
+    let interior = material(world, Color::srgb(0.46, 0.07, 0.07), 0.42);
     // One material per verdict, made once rather than per fragment. Under `Tint::Demo` all three
     // are the subject's own skin, so the verdict lookup below stays one code path either way.
     let skins: Vec<(Verdict, Handle<StandardMaterial>)> =
@@ -237,7 +248,7 @@ fn break_it(rec: &mut Recorder, tint: Tint) {
             .collect();
 
     for (i, (piece, verdict)) in pieces.into_iter().zip(verdicts).enumerate() {
-        let (velocity, spin) = launch(i, piece.center_local);
+        let (velocity, spin) = launch(i, piece.center_local, piece.cell.volume());
         // The collider a real game builds: `Collider::convex_hull(piece.cell.points())`.
         let lowest = piece.cell.points().iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
         let drop_to_rest = (piece.cell.center().y - lowest).max(0.0);
@@ -249,7 +260,7 @@ fn break_it(rec: &mut Recorder, tint: Tint) {
         let chunk = world
             .spawn((
                 Chunk { velocity, spin, drop_to_rest },
-                Transform::from_translation(ORIGIN + piece.center_local),
+                Transform::from_translation(body::ORIGIN + piece.center_local),
                 Visibility::default(),
             ))
             .id();
@@ -268,7 +279,7 @@ fn break_it(rec: &mut Recorder, tint: Tint) {
 }
 
 /// Deterministic per-fragment launch, from the crate's own frozen hash — no RNG dependency.
-fn launch(i: usize, center: Vec3) -> (Vec3, Vec3) {
+fn launch(i: usize, center: Vec3, volume: f32) -> (Vec3, Vec3) {
     let base = SEED.wrapping_mul(2_246_822_519).wrapping_add((i as u32).wrapping_mul(2_654_435_761));
     let (h1, h2, h3, h4) = (
         hash_f32(base.wrapping_add(1)),
@@ -279,8 +290,10 @@ fn launch(i: usize, center: Vec3) -> (Vec3, Vec3) {
     let angle = h1 * std::f32::consts::TAU;
     let jitter = Vec3::new(angle.cos(), 0.0, angle.sin()) * 0.5;
     let dir = (center.normalize_or_zero() + jitter + Vec3::Y * (0.6 + 0.8 * h3)).normalize_or_zero();
-    let spin = Vec3::new(h1 - 0.5, h2 - 0.5, h4 - 0.5).normalize_or_zero() * (8.0 + 8.0 * h2);
-    (dir * (3.2 + 2.4 * h4), spin)
+    // Scaled by mass: a blow delivers an impulse, so light pieces leave fast and heavy ones flop.
+    let heft = body::heft(volume);
+    let spin = Vec3::new(h1 - 0.5, h2 - 0.5, h4 - 0.5).normalize_or_zero() * (8.0 + 8.0 * h2) * heft;
+    (dir * (3.2 + 2.4 * h4) * heft, spin)
 }
 
 /// Gravity, a ground bounce and tumbling — on a fixed `DT`, so the run is reproducible.

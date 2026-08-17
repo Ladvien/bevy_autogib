@@ -40,38 +40,84 @@ pub const SEED: u32 = 0x00C0_FFEE;
 /// carried before comparing; these examples take the reach at face value.
 pub const GIVES_WAY: f32 = 0.5;
 
-/// Where the subject stands: feet on the floor.
-pub const ORIGIN: Vec3 = Vec3::new(0.0, 1.0, 0.0);
+/// Where the subject stands: feet on the floor. The lowest point is the leg bottom at `y = -0.92`.
+pub const ORIGIN: Vec3 = Vec3::new(0.0, 0.92, 0.0);
+
+/// The rounding strengths the `T` key cycles through. Changing this re-bakes, because the softening
+/// happens when the drawn mesh is built — it is not something a shader can be toggled.
+pub const SOFTENINGS: [f32; 4] = [0.0, 0.25, 0.5, 0.75];
 
 /// The piece counts the granularity dial cycles through. One bake answers all of them.
-pub const GRANULARITIES: [usize; 4] = [3, 8, 16, TARGET];
+///
+/// **The first entry is the six body parts**, because `frontier_of(6)` on a six-cell proxy is the
+/// roots — uncut. That is dismemberment; the last entry is gibs; the two in between are the range.
+pub const GRANULARITIES: [usize; 4] = [6, 12, 20, TARGET];
 
 pub const GRAVITY: f32 = 18.0;
 pub const RESTITUTION: f32 = 0.3;
 pub const GROUND_DRAG: f32 = 4.0;
 
-/// The two shells the subject is made of, each with its transform relative to the subject root.
+/// **A blocked-out humanoid: one convex cell per body part.**
 ///
-/// **The head sits exactly on the torso — `0.55 + 0.2 = 0.75` — and that is load-bearing.** Two cells
-/// are neighbours only when they share a *coplanar* face; cells that merely overlap or abut without
-/// agreeing on a plane get no bond, by design. `explode.rs` puts the head at `0.74`, overlapping the
-/// torso by a centimetre, which is fine when the whole subject bursts at once — and wrong here,
-/// because an unbonded head is its own island from the start and drops off at the first blow
-/// anywhere. Caught by `a_hit_takes_part_of_the_subject_and_leaves_the_rest_standing`, not by
-/// looking at it.
-pub fn subject() -> [(Mesh, Mat4); 2] {
-    [
-        (Mesh::from(Cuboid::new(0.7, 1.1, 0.4)), Mat4::IDENTITY),
-        (Mesh::from(Cuboid::new(0.4, 0.4, 0.4)), Mat4::from_translation(Vec3::new(0.0, 0.75, 0.0))),
+/// This replaced a torso box and a head box, and the reason is the whole point of the crate. Cutting
+/// a limbless mass with pseudorandom planes produces wedges sliced diagonally out of a blob — which
+/// reads as a frozen statue shattering, however good the fracture is, because none of the pieces is
+/// a *part of a body*. Nothing tuned in the cutter fixes that; the subject had no anatomy to break
+/// along.
+///
+/// **The joints come for free, and that is not a coincidence.** A joint is two body parts meeting
+/// over a shared surface, and [`BondGraph::of`](bevy_autogib::BondGraph::of) already finds exactly
+/// that — coplanar faces, opposite normals, positive overlap. Laid out this way the bond graph comes
+/// back with one bond per joint, its area the joint's own cross-section:
+///
+/// ```text
+/// torso <-> head    area 0.0676   the neck
+/// torso <-> arm.L   area 0.1040   the shoulder
+/// torso <-> leg.L   area 0.0528   the hip
+/// ```
+///
+/// So a hit on the shoulder takes off the arm, at every granularity, with no code that knows what an
+/// arm is. Read the bake at [`GRANULARITIES`]`[0]` and the pieces *are* the body parts; read it at
+/// the finest and they are gibs.
+///
+/// # Two placements that are load-bearing
+///
+/// **Every part touches its neighbour exactly, never overlapping.** Cells that interpenetrate share
+/// no coplanar face and get no bond, so an overlapping limb would hang off its own island and drop
+/// at the first blow anywhere. Each part's face sits *on* the torso's, not inside it.
+///
+/// **The legs are held apart by 0.04.** Touching at `x = 0` they would share a coplanar face and the
+/// graph would correctly — and uselessly — bond the legs to each other, so severing a hip would
+/// leave a leg dangling from its twin. Anatomy is the caller's business, and this is what that costs.
+pub fn subject() -> Vec<(Mesh, Mat4)> {
+    parts()
+        .into_iter()
+        .map(|(_, c, h)| (Mesh::from(Cuboid::new(h.x * 2.0, h.y * 2.0, h.z * 2.0)), Mat4::from_translation(c)))
+        .collect()
+}
+
+/// One convex cell per body part — the caller's decomposition, matching [`subject`] exactly.
+pub fn proxy() -> Vec<ProxyCell> {
+    parts().into_iter().map(|(_, c, h)| ProxyCell::from_box(c, h)).collect()
+}
+
+/// The blockout: `(name, centre, half-extents)`, in subject-local space. The name is for logging —
+/// nothing in the crate ever sees it, and nothing here branches on it.
+pub fn parts() -> Vec<(&'static str, Vec3, Vec3)> {
+    vec![
+        ("torso", Vec3::new(0.00, 0.00, 0.0), Vec3::new(0.22, 0.32, 0.14)),
+        ("head", Vec3::new(0.00, 0.46, 0.0), Vec3::new(0.13, 0.14, 0.13)),
+        ("arm.L", Vec3::new(-0.32, 0.06, 0.0), Vec3::new(0.10, 0.26, 0.10)),
+        ("arm.R", Vec3::new(0.32, 0.06, 0.0), Vec3::new(0.10, 0.26, 0.10)),
+        ("leg.L", Vec3::new(-0.13, -0.62, 0.0), Vec3::new(0.11, 0.30, 0.12)),
+        ("leg.R", Vec3::new(0.13, -0.62, 0.0), Vec3::new(0.11, 0.30, 0.12)),
     ]
 }
 
-/// One convex cell per shell — the caller's decomposition, matching [`subject`] exactly.
-pub fn proxy() -> Vec<ProxyCell> {
-    vec![
-        ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.35, 0.55, 0.2)),
-        ProxyCell::from_box(Vec3::new(0.0, 0.75, 0.0), Vec3::splat(0.2)),
-    ]
+/// Which body part a fragment came out of, by walking the hierarchy back to its root cell.
+pub fn part_of(id: FragmentId, tree: &FragmentTree) -> &'static str {
+    let root = tree.root_of(id).unwrap_or(id);
+    parts().get(root.index()).map(|(n, _, _)| *n).unwrap_or("?")
 }
 
 /// What one baked fragment needs to be spawned, resolved once so a reset costs no geometry work.
@@ -84,6 +130,8 @@ pub struct Part {
     /// **Kept, because adjacency is per frontier.** A game hands this to `Collider::convex_hull`;
     /// here it is also what `BondGraph::of` needs to bond whichever frontier is standing.
     pub cell: ProxyCell,
+    /// The fragment's volume, which is its mass at uniform density. Drives how fast it is thrown.
+    pub volume: f32,
 }
 
 /// **The bake, and it happens once.** Everything a blow does is a query against this.
@@ -96,10 +144,14 @@ pub struct Baked {
 
 impl Baked {
     /// Fracture the subject and register every fragment's meshes.
-    pub fn bake(world: &mut World) -> Baked {
+    pub fn bake(world: &mut World, soften: f32) -> Baked {
         let owned = subject();
         let parts: Vec<(&Mesh, Mat4)> = owned.iter().map(|(m, x)| (m, *x)).collect();
-        let cut = CutSettings { max_depth: MAX_DEPTH, ..CutSettings::new(TARGET, MIN_FRACTION, SEED) };
+        let cut = CutSettings {
+            max_depth: MAX_DEPTH,
+            soften,
+            ..CutSettings::new(TARGET, MIN_FRACTION, SEED)
+        };
         let baked = fracture_mesh(&parts, &proxy(), &cut);
 
         info!(
@@ -109,6 +161,7 @@ impl Baked {
             baked.tree.cuts(),
             baked.bonds.len()
         );
+        info!("soften {soften:.2} — rounding the drawn surface only; the colliders are unchanged");
 
         let parts = baked
             .fragments
@@ -121,6 +174,7 @@ impl Baked {
                     cap: f.cap.map(|m| meshes.add(m)),
                     center_local: f.center_local,
                     drop_to_rest: (f.cell.center().y - lowest).max(0.0),
+                    volume: f.cell.volume().max(1.0e-6),
                     cell: f.cell,
                 }
             })
@@ -192,7 +246,12 @@ impl BodyMaterials {
         });
         BodyMaterials {
             skin: material(world, Color::srgb(0.30, 0.42, 0.52), 0.85),
-            interior: material(world, Color::srgb(0.52, 0.09, 0.08), 0.55),
+            // **Darker and much glossier than a "red material".** At roughness 0.55 a flat cut face
+            // is lit evenly across its whole area, which is what stone and ice look like; dropping it
+            // to 0.25 puts a moving highlight on each face instead, and that specular travel is most
+            // of what reads as wet. The colour goes down, not up: bright red on a flat plane reads as
+            // paint.
+            interior: material(world, Color::srgb(0.46, 0.07, 0.07), 0.42),
             aim,
         }
     }
@@ -355,7 +414,11 @@ pub fn strike(world: &mut World, blow: Blow, at: Vec3) -> usize {
             .get_resource::<Baked>()
             .and_then(|b| b.parts.get(id.index()).map(|p| p.center_local))
             .unwrap_or(Vec3::ZERO);
-        let (velocity, spin) = launch(*id, center, at);
+        let volume = world
+            .get_resource::<Baked>()
+            .and_then(|b| b.parts.get(id.index()).map(|p| p.volume))
+            .unwrap_or(REFERENCE_VOLUME);
+        let (velocity, spin) = launch(*id, center, at, volume);
         spawn_fragment(world, *id, Some((velocity, spin)));
     }
     if !leaving.is_empty() {
@@ -366,12 +429,34 @@ pub fn strike(world: &mut World, blow: Blow, at: Vec3) -> usize {
 
 /// Thrown away from where the blow landed, with deterministic variation from the crate's own frozen
 /// hash — no RNG dependency in an example either.
-pub fn launch(id: FragmentId, center: Vec3, at: Vec3) -> (Vec3, Vec3) {
+///
+/// **Speed and spin scale down with mass, and that is most of the difference between "gibs" and
+/// "shrapnel".** Throwing every piece at the same speed is what made the old burst read as an
+/// explosion in a quarry: a severed arm and a fingernail left at identical velocity. A blow delivers
+/// roughly an impulse, so light pieces should leave fast and heavy ones should barely move and flop.
+pub fn launch(id: FragmentId, center: Vec3, at: Vec3, volume: f32) -> (Vec3, Vec3) {
     let h = |n: u32| hash_f32(id.0.wrapping_mul(2_654_435_761).wrapping_add(n));
     let away = (center - at).normalize_or_zero();
     let dir = (away + Vec3::Y * (0.35 + 0.5 * h(3))).normalize_or_zero();
+    // Cube root, because velocity from a fixed impulse goes as 1/mass and mass goes as the cube of
+    // size — so the linear dimension is the honest scale, and it keeps the spread narrow enough that
+    // a heavy piece still moves.
+    let heft = heft(volume);
     let spin = Vec3::new(h(1) - 0.5, h(2) - 0.5, h(3) - 0.5).normalize_or_zero() * (7.0 + 7.0 * h(2));
-    (dir * (2.4 + 2.0 * h(4)), spin)
+    (dir * (2.4 + 2.0 * h(4)) * heft, spin * heft)
+}
+
+/// The fragment size that leaves at unmodified speed — roughly a mid-sized chunk of this subject.
+/// Everything smaller goes faster, everything larger slower.
+pub const REFERENCE_VOLUME: f32 = 0.012;
+
+/// How much faster than a reference-sized chunk a fragment of this volume leaves.
+///
+/// Cube root, because velocity from a fixed impulse goes as `1/mass` and mass goes as the cube of
+/// size — so the linear dimension is the honest scale, and it keeps the spread narrow enough that a
+/// heavy piece still moves rather than sitting perfectly still.
+pub fn heft(volume: f32) -> f32 {
+    (REFERENCE_VOLUME / volume.max(1.0e-6)).cbrt().clamp(0.45, 2.2)
 }
 
 /// The examples' whole solver — the crate names none. Gravity, a ground bounce, and tumbling.

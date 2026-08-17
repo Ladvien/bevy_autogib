@@ -14,7 +14,7 @@ use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use crate::CutSettings;
 use crate::bond::BondGraph;
 use crate::proxy::ProxyCell;
-use crate::soup::{Soup, fracture};
+use crate::soup::{MIN_CROSS2, Soup, Vtx, WELD, fracture};
 use crate::tree::{FragmentId, FragmentTree};
 
 /// Decode a mesh's index buffer into a triangle list, handling all encodings: `U16`, `U32`, and
@@ -373,7 +373,7 @@ pub(crate) fn proxy_soup(cell: &ProxyCell) -> Soup {
 /// extent, and it is a perfectly good collider. It comes back with both meshes `None` and is bounded
 /// by its cell rather than by a render mesh it never received.
 pub(crate) fn geometry_from_piece(id: FragmentId, piece: crate::soup::Piece) -> FragmentGeometry {
-    let crate::soup::Piece { cell, render, sheets } = piece;
+    let crate::soup::Piece { cell, render, sheets, relief, soften: round } = piece;
     // The cap comes from the cell, never from the render mesh — that is the architecture in one line.
     //
     // The render mesh's boundary vertices are handed along so the cap can weave them into its own ring:
@@ -383,9 +383,15 @@ pub(crate) fn geometry_from_piece(id: FragmentId, piece: crate::soup::Piece) -> 
     // topologically, and a hairline crack under some rasterisers.
     let seam: Vec<Vec3> = render.pos.clone();
     let mut drawn = render.clone();
-    cell.append_cut_faces(&mut drawn, &seam);
-    // Open shells ride along untouched — no clip, and no cut face of their own, because a sheet has no
-    // interior to expose. See `AG-003`.
+    cell.append_cut_faces(&mut drawn, &seam, relief);
+    // **Rounded after the cap is welded on**, so the relaxation bevels the skin/cap edge too — which
+    // is the sharpest edge on the whole fragment and the one that most says "cleaved".
+    let mut drawn = soften(&drawn, round);
+
+    // **Open shells ride along untouched — not clipped, not capped, and not rounded.** A sheet has no
+    // interior to expose and no fracture edge to soften; it is the artist's own geometry, and
+    // relaxing it would curl and shrink a cape rather than round a chunk of one. Appended after the
+    // softening for exactly that reason. See `AG-003`, whose test is what caught this.
     for sheet in &sheets {
         for (t, tri) in sheet.idx.iter().enumerate() {
             drawn.push_tri(
@@ -396,6 +402,7 @@ pub(crate) fn geometry_from_piece(id: FragmentId, piece: crate::soup::Piece) -> 
             );
         }
     }
+
     // Bound by the drawn surface when there is one, by the cell when there is not. The cell is the
     // fragment's solid and always exists, so there is no case here with nothing to measure.
     let (mn, mx) = if drawn.is_empty() { cell_bbox(&cell) } else { drawn.bbox() };
@@ -622,7 +629,7 @@ mod tests {
         let cell = ProxyCell::from_box(Vec3::ZERO, Vec3::splat(0.5));
         let (above, _) = cell.clip(&crate::soup::Plane { point: Vec3::ZERO, normal: Vec3::Y });
         let mut cap = Soup::default();
-        above.expect("the cube cuts").append_cut_faces(&mut cap, &[]);
+        above.expect("the cube cuts").append_cut_faces(&mut cap, &[], 0.0);
         assert!(
             (interior_area(&cap) - 1.0).abs() < 1.0e-4,
             "cap area should be exactly 1.0, got {}",
@@ -776,6 +783,66 @@ mod tests {
         assert!(a.iter().any(|f| f.cap.is_some()), "cutting a solid must produce cut faces");
     }
 
+    /// **Two cells that share a face each keep their own surface — the joint bug.**
+    ///
+    /// A triangle sitting exactly on a shared boundary is contained by *both* cells, because
+    /// `contains` counts "on a face" as inside so that nothing falls through a gap. Assigning it to
+    /// the first such cell therefore gave the whole interface to whichever cell came first, and left
+    /// the other one holed exactly where the two met.
+    ///
+    /// Measured on a six-part humanoid before the fix: every limb was short by precisely its own
+    /// joint area — head by the neck's `0.0676`, each arm by the shoulder's `0.1040`, each leg by the
+    /// hip's `0.0528` — and the torso held all `0.3812` of it. Cells that share a face are the normal
+    /// case for a jointed subject, so this is not an exotic input.
+    #[test]
+    fn two_cells_sharing_a_face_each_keep_their_own_surface() {
+        // A box and a second box resting exactly on its +X face — a shoulder, in miniature.
+        let left = Cuboid::new(1.0, 1.0, 1.0);
+        let right = Cuboid::new(0.4, 0.4, 0.4);
+        let (lm, rm) = (Mesh::from(left), Mesh::from(right));
+        let parts = [
+            (&lm, Mat4::IDENTITY),
+            (&rm, Mat4::from_translation(Vec3::new(0.7, 0.0, 0.0))),
+        ];
+        let proxy = vec![
+            ProxyCell::from_box(Vec3::ZERO, Vec3::splat(0.5)),
+            ProxyCell::from_box(Vec3::new(0.7, 0.0, 0.0), Vec3::splat(0.2)),
+        ];
+        // Two pieces: the roots, uncut, so each fragment is exactly one box.
+        let cut = CutSettings { soften: 0.0, cap_relief: 0.0, ..CutSettings::new(2, 0.9, 4) };
+        let baked = fracture_mesh(&parts, &proxy, &cut);
+        let ids = baked.tree.frontier_of(2);
+        assert_eq!(ids.len(), 2, "expected the two proxy cells, uncut");
+
+        for (id, want) in ids.iter().zip([6.0f32, 6.0 * 0.4 * 0.4]) {
+            let f = baked.fragments.get(id.index()).expect("a fragment per cell");
+            let got = mesh_area(f.outer.as_ref()) + mesh_area(f.cap.as_ref());
+            assert!(
+                (got - want).abs() < 1.0e-3,
+                "{id:?} drew {got} of its own {want} surface — the shared face went to the other cell"
+            );
+        }
+    }
+
+    /// Total area of a mesh, for the assignment test above.
+    fn mesh_area(mesh: Option<&Mesh>) -> f32 {
+        let Some(mesh) = mesh else { return 0.0 };
+        let Some(VertexAttributeValues::Float32x3(p)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            return 0.0;
+        };
+        let Some(idx) = mesh.indices() else { return 0.0 };
+        let v: Vec<Vec3> = p.iter().map(|q| Vec3::from_array(*q)).collect();
+        idx.iter()
+            .collect::<Vec<_>>()
+            .chunks_exact(3)
+            .filter_map(|t| {
+                let (a, b, c) = (*v.get(t[0])?, *v.get(t[1])?, *v.get(t[2])?);
+                Some((b - a).cross(c - a).length() * 0.5)
+            })
+            .sum()
+    }
+
     /// An empty part list is not an error and not a panic — it is simply no fragments.
     #[test]
     fn fracture_mesh_of_nothing_is_empty() {
@@ -784,4 +851,145 @@ mod tests {
         let cube = Mesh::from(Cuboid::new(1.0, 1.0, 1.0));
         assert!(fracture_mesh(&[(&cube, Mat4::IDENTITY)], &[], &CutSettings::new(8, 0.1, 1)).tree.is_empty());
     }
+}
+
+/// **Round a fragment's drawn surface, so it reads as a lump rather than a shard.**
+///
+/// Sharp dihedral edges are the visual signature of brittle fracture — ice, glass, cleaved stone —
+/// and no amount of shaping the *pieces* changes that, because the edges are what a plane through a
+/// solid leaves behind. This subdivides the drawn triangles once and then relaxes each vertex toward
+/// the average of its neighbours, which bevels every edge and rounds every corner at the same time.
+///
+/// # It is Tier B, and that is the whole reason it is allowed to exist
+///
+/// The proxy cell is untouched, so the collider is still one exact convex hull, `audit_proxy` still
+/// measures a closed solid, and every watertightness guarantee holds. The drawn mesh ends up
+/// slightly *inside* its own collider, which is the harmless direction — a gib that renders a
+/// millimetre proud of its hull would poke through a floor it is resting on; one that renders inside
+/// it never can.
+///
+/// # Positions move, attributes do not
+///
+/// Smoothing needs to know which corners are the same point, and the soup has none of that —
+/// `push_tri` allocates three fresh vertices per triangle. So adjacency is computed over a
+/// position-only weld and the result is written *back* onto the original corners. UVs and the
+/// skin/cap interior flag survive exactly, which matters: welding them together would smear the
+/// cut-face UVs into the skin's and merge the one crease the whole crate exists to produce.
+///
+/// Normals are re-derived smooth over the welded surface, which is half of what softens the read on
+/// its own — flat per-face normals light every facet as a separate plane.
+pub(crate) fn soften(soup: &Soup, strength: f32) -> Soup {
+    if strength <= 0.0 || soup.is_empty() {
+        return soup.clone();
+    }
+
+    // One midpoint subdivision, so relaxation has vertices to work with. A fragment's drawn mesh is
+    // a few dozen corners; relaxing that directly collapses it instead of rounding it.
+    let mut fine = Soup::default();
+    for (t, tri) in soup.idx.iter().enumerate() {
+        let (a, b, c) = (soup.vtx(tri[0]), soup.vtx(tri[1]), soup.vtx(tri[2]));
+        let mid = |x: Vtx, y: Vtx| Vtx {
+            pos: (x.pos + y.pos) * 0.5,
+            nrm: (x.nrm + y.nrm).normalize_or_zero(),
+            uv: (x.uv + y.uv) * 0.5,
+        };
+        let (ab, bc, ca) = (mid(a, b), mid(b, c), mid(c, a));
+        let inside = soup.tri_interior[t];
+        for (p, q, r) in [(a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca)] {
+            fine.push_tri(p, q, r, inside);
+        }
+    }
+
+    // Position-only weld, purely to learn who neighbours whom.
+    let key = |p: Vec3| {
+        let q = |x: f32| (x / WELD).round() as i64;
+        (q(p.x), q(p.y), q(p.z))
+    };
+    let mut canon: HashMap<(i64, i64, i64), usize> = HashMap::new();
+    let mut unique: Vec<Vec3> = Vec::new();
+    let of: Vec<usize> = fine
+        .pos
+        .iter()
+        .map(|p| {
+            *canon.entry(key(*p)).or_insert_with(|| {
+                unique.push(*p);
+                unique.len() - 1
+            })
+        })
+        .collect();
+
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); unique.len()];
+    for tri in &fine.idx {
+        for i in 0..3 {
+            let (u, v) = (of[tri[i] as usize], of[tri[(i + 1) % 3] as usize]);
+            if u != v {
+                adjacency[u].push(v);
+                adjacency[v].push(u);
+            }
+        }
+    }
+
+    // Two relaxation passes. More than that and a fragment stops being the shape it was cut as; the
+    // strength dial scales how far each pass travels rather than how many there are, so turning it
+    // up rounds harder without also melting the piece.
+    let mut moved = unique.clone();
+    for _ in 0..2 {
+        let previous = moved.clone();
+        for (i, neighbours) in adjacency.iter().enumerate() {
+            if neighbours.is_empty() {
+                continue;
+            }
+            let mean: Vec3 =
+                neighbours.iter().map(|&n| previous[n]).sum::<Vec3>() / neighbours.len() as f32;
+            moved[i] = previous[i].lerp(mean, strength.clamp(0.0, 1.0) * 0.5);
+        }
+    }
+
+    // Area-weighted vertex normals over the welded surface — smooth shading, which is the other half
+    // of the softening and costs nothing.
+    let mut smooth = vec![Vec3::ZERO; unique.len()];
+    for tri in &fine.idx {
+        let (i, j, k) = (of[tri[0] as usize], of[tri[1] as usize], of[tri[2] as usize]);
+        let face = (moved[j] - moved[i]).cross(moved[k] - moved[i]);
+        smooth[i] += face;
+        smooth[j] += face;
+        smooth[k] += face;
+    }
+
+    let mut out = Soup {
+        pos: fine.pos.iter().enumerate().map(|(i, _)| moved[of[i]]).collect(),
+        nrm: fine
+            .nrm
+            .iter()
+            .enumerate()
+            .map(|(i, fallback)| {
+                let n = smooth[of[i]].normalize_or_zero();
+                // A vertex whose faces cancel has no meaningful average; keep what it had.
+                if n == Vec3::ZERO { *fallback } else { n }
+            })
+            .collect(),
+        uv: fine.uv.clone(),
+        idx: fine.idx.clone(),
+        tri_interior: fine.tri_interior.clone(),
+    };
+    // Relaxation can pull a triangle's corners together; drop the ones that no longer have area.
+    let keep: Vec<bool> = out
+        .idx
+        .iter()
+        .map(|t| {
+            let (a, b, c) = (out.pos[t[0] as usize], out.pos[t[1] as usize], out.pos[t[2] as usize]);
+            (b - a).cross(c - a).length_squared() >= MIN_CROSS2
+        })
+        .collect();
+    let mut i = 0;
+    out.idx.retain(|_| {
+        i += 1;
+        keep[i - 1]
+    });
+    let mut j = 0;
+    out.tri_interior.retain(|_| {
+        j += 1;
+        keep[j - 1]
+    });
+    out
 }

@@ -187,6 +187,14 @@ impl ProxyCell {
         self.faces.iter().map(|f| f.as_slice())
     }
 
+    /// Was face `fi` created by a cut, rather than supplied by the caller?
+    ///
+    /// A cut face is raw interior and takes the interior material; a supplied face is the caller's
+    /// own hull and is not drawn at all, because the render mesh already covers that region.
+    pub fn face_is_cut(&self, fi: usize) -> bool {
+        self.face_cut.get(fi).copied().unwrap_or(false)
+    }
+
     /// Enclosed volume. Useful for mass properties: a solver wanting uniform density needs exactly
     /// this times the density, and no other part of the fragment describes how much stuff it is.
     pub fn volume(&self) -> f32 {
@@ -367,7 +375,7 @@ impl ProxyCell {
     ///
     /// The fan is taken from each face's first vertex. That is valid because the face is convex — the
     /// property this whole tier exists to guarantee.
-    pub(crate) fn append_cut_faces(&self, out: &mut crate::soup::Soup, seam: &[Vec3]) {
+    pub(crate) fn append_cut_faces(&self, out: &mut crate::soup::Soup, seam: &[Vec3], relief: f32) {
         for (fi, f) in self.faces.iter().enumerate() {
             if !self.face_cut[fi] {
                 continue;
@@ -381,13 +389,42 @@ impl ProxyCell {
                 nrm: n,
                 uv: bevy::math::Vec2::new((p - origin).dot(bu), (p - origin).dot(bv)),
             };
-            for i in 1..ring.len() - 1 {
-                let (a, b, c) = (ring[0], ring[i], ring[i + 1]);
-                // A fan slice of zero area carries no surface and would only add a degenerate triangle.
-                if (b - a).cross(c - a).length_squared() < 1.0e-12 {
-                    continue;
+            // **Two rings, so the middle of the cap has somewhere to move.** A fan from one corner
+            // has no interior vertices at all, and a flat cut face is the visual language of cleaved
+            // stone. The boundary ring never moves — it is welded to the skin's own opening, and
+            // displacing it would crack that seam open — so the relief lives entirely on the centre
+            // point and a ring of points halfway out to the edge.
+            //
+            // The displacement is hashed from each point's own quantized position, so it needs no
+            // seed threaded down here and comes back identical on every run.
+            let n_ring = ring.len();
+            if n_ring < 3 {
+                continue;
+            }
+            let centre: Vec3 = ring.iter().copied().sum::<Vec3>() / n_ring as f32;
+            let radius = ring.iter().map(|p| p.distance(centre)).fold(0.0f32, f32::max);
+            let lift = |p: Vec3, scale: f32| -> Vec3 {
+                if relief <= 0.0 || radius <= 0.0 {
+                    return p;
                 }
-                out.push_tri(vtx(a), vtx(b), vtx(c), true);
+                let q = |x: f32| (x / WELD).round() as i64 as u32;
+                let h = crate::soup::hash_f32(q(p.x) ^ q(p.y).wrapping_mul(0x9E37_79B9) ^ q(p.z).wrapping_mul(2_654_435_761));
+                p + n * ((h - 0.5) * 2.0 * relief * radius * scale)
+            };
+            let mid: Vec<Vec3> = ring.iter().map(|p| lift(centre.lerp(*p, 0.5), 0.7)).collect();
+            let hub = lift(centre, 1.0);
+
+            let mut emit = |a: Vec3, b: Vec3, c: Vec3| {
+                // A slice of zero area carries no surface and would only add a degenerate triangle.
+                if (b - a).cross(c - a).length_squared() >= 1.0e-12 {
+                    out.push_tri(vtx(a), vtx(b), vtx(c), true);
+                }
+            };
+            for i in 0..n_ring {
+                let j = (i + 1) % n_ring;
+                emit(hub, mid[i], mid[j]);
+                emit(mid[i], ring[i], ring[j]);
+                emit(mid[i], ring[j], mid[j]);
             }
         }
     }

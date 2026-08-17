@@ -155,8 +155,17 @@ pub fn arg(flag: &str) -> Option<String> {
     None
 }
 
-/// The furniture every recorded scene shares: one key light and a floor to land on.
+/// The furniture every recorded scene shares: a key light, a fill, and a floor to land on.
 pub fn light_and_floor(world: &mut World) {
+    // **The fill is not a nicety.** With a single directional light, every surface turned away from
+    // it renders at zero — and a cut face at zero, against a dark background, does not read as a
+    // shadowed face. It reads as a *hole*, and the fragment looks like an open shell you can see
+    // through. That was reported as missing geometry and was in fact missing light.
+    world.insert_resource(GlobalAmbientLight {
+        color: Color::srgb(0.62, 0.66, 0.78),
+        brightness: 900.0,
+        ..default()
+    });
     world.spawn((
         DirectionalLight { illuminance: 9_000.0, shadow_maps_enabled: true, ..default() },
         Transform::from_xyz(4.0, 8.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),

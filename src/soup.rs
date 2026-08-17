@@ -35,6 +35,20 @@ pub(crate) const WELD: f32 = 1.0e-4;
 /// cube cut into 8 produced one fragment in 320 with `boundary_edges != 0`, seed-dependent, which
 /// is why the pinned seeds never showed it.
 pub(crate) const MIN_CROSS2: f32 = 1.0e-12;
+/// How far behind its own surface a triangle is tested for cell membership.
+///
+/// Must exceed [`EPS`], or [`ProxyCell::contains`](crate::proxy::ProxyCell)'s "on a face counts as
+/// inside" tolerance swallows it and the test is unchanged; must stay well under the thinnest cell
+/// any caller supplies, or a triangle is nudged clean through its own solid and comes back homeless.
+/// Positions are subject-local — roughly a metre for a character — so a tenth of a millimetre sits
+/// two orders of magnitude clear on both sides.
+pub(crate) const INWARD_NUDGE: f32 = 1.0e-3;
+
+/// Outward unit normal of a triangle, or zero for a degenerate one — which nudges nothing and leaves
+/// the centroid test exactly as it was.
+fn face_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    (b - a).cross(c - a).normalize_or_zero()
+}
 
 /// The crate's only random source: a 32-bit integer hash mapped into `[0, 1)`.
 ///
@@ -197,6 +211,12 @@ pub(crate) struct Piece {
     pub(crate) render: Soup,
     /// Open shells assigned to this fragment and **never clipped** — see [`Shell`].
     pub(crate) sheets: Vec<Soup>,
+    /// [`CutSettings::cap_relief`], carried to emit time. It changes nothing about the cut — it is
+    /// Tier B, read only when the drawn cap is built — but riding along on the piece keeps it out of
+    /// four intermediate signatures that have no other reason to know about it.
+    pub(crate) relief: f32,
+    /// [`CutSettings::soften`], carried the same way and for the same reason.
+    pub(crate) soften: f32,
 }
 
 /// One connected component of a triangle soup, and whether it is a *solid's* surface or a sheet.
@@ -328,7 +348,7 @@ pub(crate) fn fracture(
     proxy: &[ProxyCell],
     cut: &CutSettings,
 ) -> (Vec<Piece>, FragmentTree) {
-    let CutSettings { target, min_fraction, max_depth, plane_jitter, size_spread, seed } = *cut;
+    let CutSettings { target, min_fraction, max_depth, plane_jitter, size_spread, weak_axis, cap_relief, soften, seed } = *cut;
     // Tier B assignment. Every triangle goes to the first cell containing its centroid — first, not
     // nearest, because overlapping shells (a head sunk into a torso) are the normal case and a
     // deterministic tie-break beats a distance that can flip on a rounding difference.
@@ -336,8 +356,10 @@ pub(crate) fn fracture(
     // **Open shells are assigned as a unit and never clipped.** A cape, a hair card or a decal has no
     // interior for a plane to divide; cutting one in half separates geometry the artist drew as
     // continuous. See [`Shell`].
-    let mut pieces: Vec<Piece> =
-        proxy.iter().map(|c| Piece { cell: c.clone(), render: Soup::default(), sheets: Vec::new() }).collect();
+    let mut pieces: Vec<Piece> = proxy
+        .iter()
+        .map(|c| Piece { cell: c.clone(), render: Soup::default(), sheets: Vec::new(), relief: cap_relief, soften })
+        .collect();
     let mut homeless = 0usize;
     let mut carried = 0usize;
 
@@ -366,6 +388,18 @@ pub(crate) fn fracture(
             let tri = render.idx[t];
             let (a, b, c) = (render.vtx(tri[0]), render.vtx(tri[1]), render.vtx(tri[2]));
             let mid = (a.pos + b.pos + c.pos) / 3.0;
+            // **Test just inside the surface, not on it.** A triangle's outward normal points away
+            // from the solid it bounds, so a point a hair behind it is inside the cell that triangle
+            // actually belongs to — and outside the neighbour it merely touches.
+            //
+            // Testing the bare centroid gets this wrong whenever two cells share a face, which is
+            // exactly what a joint is. `contains` counts "on a face" as inside, deliberately, so a
+            // triangle on the boundary is inside *both* cells and the first one wins. Measured on a
+            // six-part humanoid: every limb's inward face was assigned to the torso, leaving each
+            // limb with a hole precisely where it met the body — head short by 0.0676, the neck's
+            // own area; each arm by 0.1040, the shoulder's; each leg by 0.0528, the hip's; and the
+            // torso holding all 0.3812 of it. Which is to say the hole was exactly joint-shaped.
+            let mid = mid - face_normal(a.pos, b.pos, c.pos) * INWARD_NUDGE;
             match pieces.iter().position(|p| p.cell.contains(mid)) {
                 Some(i) => pieces[i].render.push_tri(a, b, c, render.tri_interior[t]),
                 None => homeless += 1,
@@ -448,8 +482,32 @@ pub(crate) fn fracture(
         let s = seed
             .wrapping_add((cut_index as u32).wrapping_mul(2_654_435_761))
             .wrapping_add(live.len() as u32);
-        let normal = random_dir(s);
+        // **Cut across the piece's narrow dimension, not at a random angle.** The cut face is
+        // perpendicular to the normal, so the direction the piece is *longest* along is the one that
+        // gives the smallest cross-section — which is where a real thing comes apart. Sampling a few
+        // candidates and keeping the longest is most of Sellán et al.'s "break across weak regions"
+        // for the cost of a few dot products, and `weak_axis = 0` samples once, which is exactly the
+        // behaviour every bake before this had.
         let centroid = pieces[parent].cell.centroid();
+        let candidates = 1 + (weak_axis.clamp(0.0, 1.0) * 7.0).round() as u32;
+        let mut normal = random_dir(s);
+        if candidates > 1 {
+            let span_of = |n: Vec3| {
+                let (lo, hi) = pieces[parent].cell.span_along(n, centroid);
+                hi - lo
+            };
+            let mut best = span_of(normal);
+            for k in 1..candidates {
+                let d = random_dir(s ^ k.wrapping_mul(0x9E37_79B9));
+                let span = span_of(d);
+                // SORT-OK: strictly greater, scanned in candidate order, so a tie keeps the first —
+                // a total order over the candidate list and a function of the geometry alone.
+                if span > best {
+                    best = span;
+                    normal = d;
+                }
+            }
+        }
         // **Slide the plane off centre.** A plane through the centroid halves the piece, and halving
         // every piece every time is what makes the output read as uniform shards. The offset is
         // measured against how far *this* piece reaches along *this* normal, scaled back toward the
@@ -495,8 +553,8 @@ pub(crate) fn fracture(
         nodes[parent].children = Some([FragmentId(above_id as u32), FragmentId(below_id as u32)]);
         nodes[parent].split_at = Some(cuts);
 
-        pieces.push(Piece { cell: above, render: ra, sheets: sa });
-        pieces.push(Piece { cell: below, render: rb, sheets: sb });
+        pieces.push(Piece { cell: above, render: ra, sheets: sa, relief: cap_relief, soften });
+        pieces.push(Piece { cell: below, render: rb, sheets: sb, relief: cap_relief, soften });
 
         live[slot] = above_id;
         live.push(below_id);

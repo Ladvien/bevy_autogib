@@ -33,6 +33,29 @@ fn cut(seed: u32) -> CutSettings {
     CutSettings { max_depth: MAX_DEPTH, ..CutSettings::new(TARGET, MIN_FRACTION, seed) }
 }
 
+/// Total surface area of everything a fragment draws — a blunt but honest measure of how much the
+/// rounding has relaxed it, since smoothing a surface shrinks it.
+fn drawn_area(f: &FragmentGeometry) -> f32 {
+    [f.outer.as_ref(), f.cap.as_ref()].into_iter().flatten().map(mesh_area).sum()
+}
+
+fn mesh_area(mesh: &Mesh) -> f32 {
+    use bevy::mesh::VertexAttributeValues;
+    let Some(VertexAttributeValues::Float32x3(p)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
+        return 0.0;
+    };
+    let Some(idx) = mesh.indices() else { return 0.0 };
+    let v: Vec<Vec3> = p.iter().map(|q| Vec3::from_array(*q)).collect();
+    idx.iter()
+        .collect::<Vec<_>>()
+        .chunks_exact(3)
+        .filter_map(|t| {
+            let (a, b, c) = (*v.get(t[0])?, *v.get(t[1])?, *v.get(t[2])?);
+            Some((b - a).cross(c - a).length() * 0.5)
+        })
+        .sum()
+}
+
 fn tri_count(mesh: Option<&Mesh>) -> usize {
     mesh.and_then(|m| m.indices()).map_or(0, |i| i.len() / 3)
 }
@@ -84,6 +107,25 @@ fn main() {
             f.len()
         );
     }
+
+    // **`soften` rounds the drawn fragment and nothing else.** Hard dihedral edges are what a plane
+    // through a solid leaves behind, and they read as ice however good the fracture is. The numbers
+    // that matter are in the last column: the cell volume does not move, because the rounding is
+    // Tier B — the collider, the cut faces' watertightness and every audit verdict are untouched.
+    println!();
+    println!("  soften — rounding the drawn surface (Tier B only)");
+    println!("    value     drawn tris   drawn area   cell volume");
+    for value in [0.0f32, 0.25, 0.5, 0.75] {
+        let c = CutSettings { soften: value, ..cut(seed) };
+        let f = fracture_mesh(&parts, &proxy, &c).into_leaves();
+        let tris: usize = f.iter().map(|p| tri_count(p.outer.as_ref()) + tri_count(p.cap.as_ref())).sum();
+        let area: f32 = f.iter().map(drawn_area).sum();
+        let vol: f32 = f.iter().map(|p| p.cell.volume()).sum();
+        println!("    {value:>5.2}     {tris:>10}   {area:>10.3}   {vol:>11.4}");
+    }
+    println!("    (the cell volume is the point: it never moves. Rounding is applied to the mesh you");
+    println!("     draw, never to the convex cell you hand a solver, so a softer look costs nothing");
+    println!("     in collision fidelity. The drawn area falls because relaxing a surface shrinks it.)");
 
     // **Which fragments touch which.** The hierarchy says what nests; this says what neighbours,
     // and only the second lets one piece come off while the rest stays standing.

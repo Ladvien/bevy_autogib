@@ -9,23 +9,28 @@ cargo run --release --example sever           # needs a GPU
 cargo run --release --example explode         # needs a GPU
 ```
 
-The clips below are **not screen recordings**. They come from two headless recorders,
-`capture` and `capture_sever`, which render the same scenes on a fixed timestep with no window and no
-wall clock. Frame 62 of one run is frame 62 of the next, so two GIFs taken either side of a change
-differ only where the geometry does — which is what makes them worth committing. Regenerating them is
+The clips below are **not screen recordings**. They come from two headless recorders, `capture` and
+`capture_sever`, which render the same scenes on a fixed timestep with no window and no wall clock.
+Frame 62 of one run is frame 62 of the next, so two GIFs taken either side of a change differ only
+where the geometry does — which is what makes them worth committing. Regenerating them is
 [at the bottom](#regenerating-these).
+
+**The subject is a blocked-out humanoid** — torso, head, two arms, two legs, one convex proxy cell
+each. That matters more than it looks. Cutting a limbless mass with pseudorandom planes produces
+wedges sliced diagonally out of a blob, which reads as a frozen statue shattering however good the
+fracture is, because none of the pieces is a *part of a body*. Nothing tuned in the cutter fixes
+that; the subject had no anatomy to break along.
 
 ---
 
 ## `sever` — it comes apart where you hit it
 
-![A blue two-part figure standing; a projectile takes the top off its head, another takes a piece off its shoulder, a slash cleaves its chest, a blade sweeps through its middle and a blast scatters what is left — the raw red interior showing on every cut face](sever.gif)
+![A blue blocked-out humanoid standing; a projectile takes off its arm, another its head, a slash takes the other arm, a blade through the waist takes both legs and a blast finishes the torso](sever.gif)
 
 The subject stays standing and you take pieces off it. One bake, cached at startup; every blow is a
 region query against it plus a threshold, and whatever stops being connected falls off.
 
-The clip is scripted — a projectile to the head, another to the shoulder, a slash across the chest, a
-swept blade through the middle, a blast at the base. Run it yourself and you aim:
+The clip is scripted. Run it yourself and you aim:
 
 ```text
   arrows / WASD   move the aim marker
@@ -34,23 +39,48 @@ swept blade through the middle, a blast at the base. Run it yourself and you aim
   3               a swept blade  — every bond the swing passed through, no falloff
   4               a blast        — falloff from a point in open space
   5               a pull         — weighted by how squarely each face meets it
-  G               granularity — cycle which frontier of the bake is standing (3 / 8 / 16 / 34)
+  G               granularity — cycle which frontier of the bake is standing (6 / 12 / 20 / 34)
+  T               soften — cycle how hard the drawn fragments are rounded (0 / 0.25 / 0.5 / 0.75)
   R               reset
 ```
+
+**`T` is the one to press first.** At `0.0` the fragments keep the hard dihedral edges a plane cut
+leaves behind, and that is the visual language of ice and cleaved stone however good the fracture
+underneath is. One press and the same cuts read as torn.
+
+`G` re-reads the bake it already has; `T` has to cut again, because the rounding is built into the
+drawn mesh rather than applied by a shader.
 
 What the run above actually does, from its own log:
 
 | blow | bonds reached | gave way | fragments off |
 |---|---|---|---|
-| projectile, head | 21 | 6 | 2 |
-| projectile, shoulder | 82 | 22 | 1 |
-| slash, chest | 98 | 58 | 12 |
-| swept blade, middle | 34 | 34 | 8 |
-| blast, base | 135 | 87 | 10 |
+| projectile, left shoulder | 59 | 16 | 2 |
+| projectile, head | 29 | 11 | 4 |
+| slash, right shoulder | 76 | 53 | 7 |
+| swept blade, waist | 6 | 6 | **11** |
+| blast, chest | 103 | 91 | 9 |
 
-Note the second row: a hit that reaches 82 bonds and severs 22 still takes only **one** piece off,
-because the rest are held on by bonds the region missed. That is the behaviour that makes repeated
-damage read as wearing a thing down rather than as a switch.
+Two rows are worth reading twice. The **swept blade** reached only 6 bonds and took 11 fragments off
+— those 6 are the hips, and what left was both legs. And the second **projectile** reaches 29 bonds
+while severing 11: a hit that reaches a lot and detaches little is a fragment still held on by the
+bonds the region missed, which is what makes repeated damage read as wearing a thing down rather than
+as a switch.
+
+### The joints were never authored
+
+A joint is two body parts meeting over a shared surface, and that is exactly what the bond graph
+looks for — coplanar faces, opposite normals, positive overlap. Laid out as one cell per part, the
+graph comes back with one bond per joint, its area the joint's own cross-section:
+
+```text
+torso <-> head    area 0.0676   the neck
+torso <-> arm.L   area 0.1040   the shoulder
+torso <-> leg.L   area 0.0528   the hip
+```
+
+So a hit on the shoulder takes off the arm, at every granularity, with no code that knows what an arm
+is. Read the bake at 6 pieces and the pieces *are* the body parts; read it at 34 and they are gibs.
 
 **None of the decisions in that table are the crate's.** `bevy_autogib` hands back a *reach* — a
 severity in `[0,1]` per bond — and `examples/common/body.rs` picks the threshold at which one gives
@@ -61,26 +91,21 @@ material and by how much damage the blow carried; the crate has neither fact.
 
 ## `explode` — prefracture, then one despawn and a spawn
 
-![A blue two-part solid standing intact, then bursting into tumbling fragments whose cut faces are raw red while their outer surfaces stay blue](explode.gif)
+![A blue blocked-out humanoid standing intact, then bursting into tumbling rounded chunks whose cut faces are raw red while their outer surfaces stay blue](explode.gif)
 
 The other half, and the shape a death actually wants: the subject is intact, then it *is* its own
 fragments. The break is one despawn and a spawn, because the fracture was computed long before.
 
-> **This clip is a hand-framed asset, not a generated one** — 560×398, tighter crop, no burned-in
-> caption — and it is the repo's splash image. **Do not overwrite it from `capture`.** It was
-> clobbered once by exactly that, which is the only reason this note exists.
->
-> It also predates the AG-018 shape change, so its fragments are more uniform than the ones the code
-> produces today. The clip below is the same subject and the same burst rendered from current
-> geometry, so nothing on this page is misrepresenting the cutter — only this one clip's *framing* is
-> historical.
-
 **The red is not a colour choice, it is the whole idea.** Every fragment comes back as two meshes —
-the subject's original surface and the faces this cut just created — so the inside can take a
-different material. Render both with the skin material and the same fragments stop looking broken and
-start looking disassembled.
+the subject's own surface and the faces this cut just created — so the inside can take a different
+material. Render both with the skin material and the same fragments stop looking broken and start
+looking disassembled.
 
 Press **Space** to break it early, or to break it again with a new seed.
+
+Note the motion: launch speed scales with fragment mass, so light chips leave fast and heavy chunks
+barely move and flop. Throwing every piece at one speed leaves a severed limb and a splinter at
+identical velocity, which reads as an explosion in a quarry rather than as something coming apart.
 
 ---
 
@@ -101,6 +126,10 @@ All 18 come back green, and under Tier A they must: a plane through a convex cel
 cells, and there is no input for which that can fail. Magenta here would mean the cell clipper is
 wrong, not that the subject was awkward.
 
+This clip is rendered at `soften = 0.25` deliberately. The rounding is Tier B — it touches only the
+drawn mesh — so a clip that is *about* the solid's audit verdict should show that the verdict does
+not move when the look does. It is still 18 of 18 green.
+
 The verdict is taken on the **proxy cell** — the artefact that is a solid — never on the render skin,
 which is a surface subset and open by construction. Colouring by the skin's watertightness paints
 almost everything magenta and says nothing.
@@ -113,7 +142,8 @@ that predated the Tier A/B split.
 ## `fracture_cube` — the numbers, in a terminal
 
 No window, no GPU, no `App`. A GIF of it would be a still image of text, so here is the text — it is
-the fastest way to see what a settings change does.
+the fastest way to see what a settings change does. It keeps the older torso-and-head fixture on
+purpose: it is the smallest subject that is still honestly non-manifold where two shells meet.
 
 ```text
   granularity — one bake, read back at each piece count:
@@ -123,27 +153,16 @@ the fastest way to see what a settings change does.
       8 asked →   8 pieces, total volume 0.2493
      12 asked →  12 pieces, total volume 0.2493
 
-  adjacency — 37 bonds over 12 finest fragments
-    intact, that is 1 island(s)
-    severing fragment 1's 3 bond(s) leaves 2 island(s) of sizes [1, 11]
+  soften — rounding the drawn surface (Tier B only)
+    value     drawn tris   drawn area   cell volume
+     0.00            921        7.073        0.2493
+     0.25           3688        6.233        0.2493
+     0.50           3688        5.597        0.2493
+     0.75           3688        5.105        0.2493
 
-   #   centre (x, y, z)          half-extents         skin    cap   volume
-  ─────────────────────────────────────────────────────────────────────────────────
-    0    0.000  0.670  0.000    0.170 0.170 0.170      10      0   ############
-    1   -0.000  0.337 -0.000    0.300 0.163 0.175      18     10   #########···
-    2   -0.000 -0.057  0.095    0.300 0.433 0.080      13     15   ####········
-    3    0.000 -0.180 -0.080    0.300 0.320 0.095      18     13   ###·········
-    4    0.004  0.099 -0.007    0.296 0.401 0.168      13     17   #########···
-    5    0.000 -0.176 -0.074    0.300 0.324 0.101      15     19   ####········
-    6    0.000 -0.001  0.025    0.300 0.499 0.150      20     21   ######······
-    7    0.054  0.156  0.058    0.246 0.344 0.117      18     13   ####········
-    8   -0.041 -0.180 -0.059    0.259 0.320 0.116      13      5   ######······
-    9   -0.022  0.083 -0.002    0.278 0.290 0.173      15     10   #######·····
-   10    0.000 -0.317  0.048    0.300 0.183 0.127      20     16   #########···
-   11    0.105  0.015  0.086    0.195 0.293 0.089       5      6   ###·········
-  ─────────────────────────────────────────────────────────────────────────────────
-  12 fragments · 178 skin triangles · 145 cut-face triangles
-  the fracture itself took 2.11 ms.
+  adjacency — 31 bonds over 12 finest fragments
+    intact, that is 1 island(s)
+    severing fragment 21's 2 bond(s) leaves 2 island(s) of sizes [11, 1]
 
    THE SOLID — each fragment's convex proxy cell, every face, closed
   ─────────────────────────────────────────────────────────────────────────────────
@@ -154,30 +173,31 @@ the fastest way to see what a settings change does.
    volume enclosed                      0.2493
   ─────────────────────────────────────────────────────────────────────────────────
 
-   THE DRAWN SURFACE — skin ∪ cut face. Open by construction; nothing here is a defect
-  ─────────────────────────────────────────────────────────────────────────────────
-   triangles                           323
-   open edges (recorded, not asserted)  99
-   non-manifold features                 9
-   inside-out edges                      6   ← the seam
-  ─────────────────────────────────────────────────────────────────────────────────
-
   re-fracturing with the same seed gave 12 pieces — bit-identical: true
 ```
 
-Three things in there are worth reading twice.
+Four things in there are worth reading twice.
 
 **Every granularity conserves the same volume.** `2 asked` and `12 asked` are two frontiers of one
 bake, not two bakes, and both tile the subject exactly once.
 
+**`soften` costs nothing in collision fidelity, and the table proves it.** Rounding is applied to the
+mesh you draw, never to the convex cell you hand a solver, so the cell volume is identical at every
+strength while the drawn area falls away. The drawn mesh ends up slightly *inside* its own collider,
+which is the harmless direction — a gib rendering proud of its hull would poke through a floor it is
+resting on; one rendering inside it never can. The triangle count quadruples once and then stops,
+because the subdivision happens at any non-zero strength and the dial only changes how far the
+relaxation travels.
+
 **The two audit blocks are different questions and must never be added together.** A fragment is a
 closed convex *cell* and a *subset of the subject's own surface*. The first is a solid, and 12 of 12
-come back closed. The second has a boundary because a subset of a surface has a boundary — those 99
-open edges are where the skin ends and the cut begins, which is what makes it a subset. Tracked, never
+come back closed. The second has a boundary because a subset of a surface has a boundary — those open
+edges are where the skin ends and the cut begins, which is what makes it a subset. Tracked, never
 asserted to zero.
 
-**The volume bar is the size distribution.** It used to be keyed on the longest axis, which read every
-slab as large and hid the thing `plane_jitter` and `size_spread` exist to change.
+**The volume bar in the fragment table is the size distribution.** It used to be keyed on the longest
+axis, which read every slab as large and hid the thing `plane_jitter` and `size_spread` exist to
+change.
 
 ---
 
@@ -188,20 +208,19 @@ code. Both recorders write one PNG per frame; `tools/gif.sh` does the encode, wi
 palette so two GIFs a week apart are actually comparable.
 
 ```sh
-cargo run --release --example capture       -- --out frames-audit --tint audit
+cargo run --release --example capture       -- --out frames-demo  --tint demo  --width 720 --height 512 --soften 0.5
+cargo run --release --example capture       -- --out frames-audit --tint audit --width 720 --height 512 --soften 0.25
 cargo run --release --example capture_sever -- --out frames-sever
 
-LEGEND=audit tools/gif.sh frames-audit docs/fracture-tier-ab.gif "Tier A/B fracture — every fragment audited as a solid"
-LEGEND=none  tools/gif.sh frames-sever docs/sever.gif            "sever — projectile, projectile, slash, blade, blast"
+WIDTH=560 LEGEND=none  tools/gif.sh frames-demo  docs/explode.gif ""
+WIDTH=560 LEGEND=audit tools/gif.sh frames-audit docs/fracture-tier-ab.gif "Tier A/B — every fragment audited as a solid"
+WIDTH=560 LEGEND=none  tools/gif.sh frames-sever docs/sever.gif ""
 ```
 
 `LEGEND=none` omits the green/amber/magenta key, which belongs only on the audit-tinted clip: a key
-naming colours that are not in the picture is worse than no key at all.
-
-**`docs/explode.gif` is deliberately absent from that list.** It is the splash asset described above,
-and `capture --tint demo` produces a differently-framed, captioned clip that is not a drop-in
-replacement for it. If it ever genuinely needs regenerating, render to a scratch path first and look
-at it next to the current one.
+naming colours that are not in the picture is worse than no key at all. `--width`/`--height` set the
+render aspect — `720x512` matches the 560×398 the clips are encoded at, so the crop is not itself one
+of the differences when you hold two of them up next to each other.
 
 The two recorders share `examples/common/` — the headless harness, and the subject and damage rules
 `sever` itself uses. That sharing is deliberate: a recorder that reimplements its subject drifts from

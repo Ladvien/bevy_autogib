@@ -57,6 +57,42 @@ pub struct CutSettings {
     /// widening the size distribution. The nudge is a stable hash of the piece's own node id, so it
     /// is reproducible and does not shift as the frontier grows.
     pub size_spread: f32,
+    /// **How hard to break a piece across its narrowest dimension instead of at a random angle.**
+    ///
+    /// A uniformly-sampled cut normal slices diagonally through whatever it is given, which on a
+    /// limb produces long oblique wedges — and on a body reads as a statue shattering rather than
+    /// something coming apart. Sellán et al.'s finding is that geometric prefracture is blind to
+    /// where a shape is *weak*, and a shape is weak across its thin cross-sections.
+    ///
+    /// This buys most of that cheaply: sample several candidate normals and keep the one the piece
+    /// is *longest* along, because the cut face is perpendicular to the normal, so the longest axis
+    /// gives the smallest cross-section. `0.0` samples once and is exactly the old behaviour; `1.0`
+    /// samples eight and takes the best.
+    pub weak_axis: f32,
+    /// **How much the drawn cut face is crumpled**, as a fraction of its own radius.
+    ///
+    /// A flat cut face is the visual language of cleaved stone and ice, and no amount of fragment
+    /// shaping changes that — it is what a plane through a solid leaves behind. This displaces the
+    /// *interior* of the emitted cap, never its boundary, so the seam against the skin stays shut.
+    ///
+    /// **It touches Tier B only.** The proxy cell stays exactly planar, so the collider is still one
+    /// convex hull and every watertightness guarantee is untouched — [`audit_proxy`] measures the
+    /// cell, not this. `0.0` leaves the cap flat.
+    pub cap_relief: f32,
+    /// **How much to round the drawn fragment**, so it reads as a lump rather than a shard.
+    ///
+    /// Sharp dihedral edges are the visual signature of brittle fracture — ice, glass, cleaved stone.
+    /// Shaping the pieces differently does not change that, because the edges are simply what a plane
+    /// through a solid leaves behind. This subdivides the drawn surface and relaxes it, bevelling
+    /// every edge and rounding every corner, and re-derives smooth normals so each facet stops being
+    /// lit as a separate plane.
+    ///
+    /// **Tier B only, like [`cap_relief`](Self::cap_relief).** The proxy cell is untouched, so the
+    /// collider is still one exact convex hull and every watertightness guarantee holds. The drawn
+    /// mesh ends up slightly *inside* its hull, which is the harmless direction.
+    ///
+    /// `0.0` leaves the fragment exactly as cut. Around `0.5` reads as flesh; `1.0` is a pebble.
+    pub soften: f32,
     /// Drives every plane direction and every jitter draw — the only source of variation.
     pub seed: u32,
 }
@@ -72,12 +108,15 @@ impl CutSettings {
             max_depth: d.max_depth,
             plane_jitter: d.plane_jitter,
             size_spread: d.size_spread,
+            weak_axis: d.weak_axis,
+            cap_relief: d.cap_relief,
+            soften: d.soften,
             seed,
         }
     }
 }
 
-/// How hard to break things. Eight dials, all bake-time — nothing here decides how a chunk *moves*
+/// How hard to break things. Eleven dials, all bake-time — nothing here decides how a chunk *moves*
 /// after it exists, because that is the caller's physics, not this crate's business.
 ///
 /// The piece count is driven by the mesh's own bounding size rather than authored per asset:
@@ -117,6 +156,12 @@ pub struct FractureSettings {
     pub plane_jitter: f32,
     /// How much the largest-first cut order may be nudged — see [`CutSettings::size_spread`].
     pub size_spread: f32,
+    /// How hard to cut across the narrow dimension — see [`CutSettings::weak_axis`].
+    pub weak_axis: f32,
+    /// How much the drawn cut face is crumpled — see [`CutSettings::cap_relief`].
+    pub cap_relief: f32,
+    /// How much the drawn fragment is rounded — see [`CutSettings::soften`].
+    pub soften: f32,
 }
 
 impl Default for FractureSettings {
@@ -130,6 +175,9 @@ impl Default for FractureSettings {
             max_depth: 12,
             plane_jitter: 0.35,
             size_spread: 0.5,
+            weak_axis: 0.75,
+            cap_relief: 0.30,
+            soften: 0.5,
         }
     }
 }
@@ -169,6 +217,13 @@ impl FractureSettings {
                 self.plane_jitter
             ));
         }
+        for (name, v) in
+            [("weak_axis", self.weak_axis), ("cap_relief", self.cap_relief), ("soften", self.soften)]
+        {
+            if !(0.0..=1.0).contains(&v) {
+                return Err(format!("bevy_autogib: {name} is {v} — it must be in [0, 1]."));
+            }
+        }
         if self.size_spread < 0.0 {
             return Err(format!(
                 "bevy_autogib: size_spread is {} — negative would invert the cut order into \
@@ -191,6 +246,9 @@ impl FractureSettings {
             max_depth: self.max_depth,
             plane_jitter: self.plane_jitter,
             size_spread: self.size_spread,
+            weak_axis: self.weak_axis,
+            cap_relief: self.cap_relief,
+            soften: self.soften,
             seed,
         }
     }
