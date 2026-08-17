@@ -467,6 +467,83 @@ mod tests {
         );
     }
 
+    /// A single-quad "cape" hanging off the torso's back — an **open shell**: two triangles, four
+    /// boundary edges, no interior whatsoever.
+    fn cape() -> Mesh {
+        let mut m = Mesh::new(
+            bevy::mesh::PrimitiveTopology::TriangleList,
+            bevy::asset::RenderAssetUsages::default(),
+        );
+        // Inside the torso's cell (z spans ±0.175), and deliberately **not** on any box face:
+        // the torso's back is at -0.175 and the head's at -0.17, so -0.16 belongs to the cape alone.
+        let z = -0.16f32;
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![[-0.25, -0.4, z], [0.25, -0.4, z], [0.25, 0.4, z], [-0.25, 0.4, z]],
+        );
+        m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, -1.0]; 4]);
+        m.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        m.insert_indices(bevy::mesh::Indices::U32(vec![0, 1, 2, 0, 2, 3]));
+        m
+    }
+
+    /// **AG-003 — a sheet is carried, never cut.**
+    ///
+    /// A cape, a hair card or a decal has no interior. A plane through one does not divide a volume;
+    /// it separates geometry the artist drew as continuous, and the old capper would additionally try
+    /// to close the "cut" and emit a degenerate solid. Under Tier A/B the danger changed shape but did
+    /// not go away: nothing caps the render mesh any more, but a sheet would still be *clipped* into
+    /// pieces by every plane crossing it.
+    ///
+    /// So the cape must come out of the fracture whole, in exactly one fragment, with its two triangles
+    /// intact.
+    #[test]
+    fn an_open_shell_survives_the_fracture_whole() {
+        let (parts, proxy) = torso_and_head();
+        let cape = cape();
+        let placed = [
+            (&parts[0], Mat4::IDENTITY),
+            (&parts[1], Mat4::from_translation(Vec3::new(0.0, 0.67, 0.0))),
+            (&cape, Mat4::IDENTITY),
+        ];
+        let pieces = fracture_mesh(&placed, &proxy, 12, 0.15, 0x00C0_FFEE, None);
+        assert!(!pieces.is_empty(), "the subject did not fracture");
+
+        // The cape's triangles are the only ones with a -Z normal at z = -0.17, and they are
+        // recognisable by area: two triangles of 0.5 * 0.5 * 0.8 = 0.2 each.
+        let mut holders = 0usize;
+        let mut cape_tris = 0usize;
+        for p in &pieces {
+            let Some(outer) = p.outer.as_ref() else { continue };
+            let n = cape_triangles(outer, p.center_local);
+            if n > 0 {
+                holders += 1;
+                cape_tris += n;
+            }
+        }
+        assert_eq!(holders, 1, "the cape was split across {holders} fragments; it must ride on exactly one");
+        assert_eq!(cape_tris, 2, "the cape should arrive with both its triangles, got {cape_tris}");
+    }
+
+    /// Count triangles that lie in the cape's plane, undivided.
+    fn cape_triangles(mesh: &Mesh, recenter: Vec3) -> usize {
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            return 0;
+        };
+        let Some(idx) = mesh.indices() else { return 0 };
+        let v: Vec<u32> = idx.iter().map(|i| i as u32).collect();
+        v.chunks_exact(3)
+            .filter(|t| {
+                t.iter().all(|&i| {
+                    let p = pos[i as usize];
+                    (p[2] + recenter.z + 0.16).abs() < 1.0e-4
+                })
+            })
+            .count()
+    }
+
     /// **The crate's central promise, tested against every byte.**
     ///
     /// `check_determinism` runs the closure three times — twice into fresh buffers, once into a buffer

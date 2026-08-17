@@ -359,7 +359,8 @@ pub(crate) fn proxy_soup(cell: &ProxyCell) -> Soup {
 }
 
 /// Turn one finished piece into recentered meshes. `None` if it draws nothing at all.
-pub(crate) fn geometry_from_piece(cell: ProxyCell, render: &Soup) -> Option<FragmentGeometry> {
+pub(crate) fn geometry_from_piece(piece: crate::soup::Piece) -> Option<FragmentGeometry> {
+    let crate::soup::Piece { cell, render, sheets } = piece;
     // The cap comes from the cell, never from the render mesh — that is the architecture in one line.
     //
     // The render mesh's boundary vertices are handed along so the cap can weave them into its own ring:
@@ -370,6 +371,18 @@ pub(crate) fn geometry_from_piece(cell: ProxyCell, render: &Soup) -> Option<Frag
     let seam: Vec<Vec3> = render.pos.clone();
     let mut drawn = render.clone();
     cell.append_cut_faces(&mut drawn, &seam);
+    // Open shells ride along untouched — no clip, and no cut face of their own, because a sheet has no
+    // interior to expose. See `AG-003`.
+    for sheet in &sheets {
+        for (t, tri) in sheet.idx.iter().enumerate() {
+            drawn.push_tri(
+                sheet.vtx(tri[0]),
+                sheet.vtx(tri[1]),
+                sheet.vtx(tri[2]),
+                sheet.tri_interior[t],
+            );
+        }
+    }
     if drawn.is_empty() {
         return None;
     }
@@ -441,7 +454,7 @@ pub fn fracture_mesh(
     }
     fracture(soup, proxy, target, min_fraction, seed, impact_dir)
         .into_iter()
-        .filter_map(|(cell, render)| geometry_from_piece(cell, &render))
+        .filter_map(geometry_from_piece)
         .collect()
 }
 
@@ -517,12 +530,12 @@ mod tests {
         let b = fracture(cube_soup(), &proxy, 8, 0.05, 0xABCD_1234, None);
         assert_eq!(a.len(), b.len());
         assert!(a.len() >= 2 && a.len() <= 8, "reached a sane fragment count: {}", a.len());
-        assert!(a.iter().all(|(_, s)| !s.is_empty()), "every piece kept some render surface");
+        assert!(a.iter().all(|p| !p.render.is_empty()), "every piece kept some render surface");
         assert!(
-            a[0].0.centroid().distance(b[0].0.centroid()) < 1.0e-6,
+            a[0].cell.centroid().distance(b[0].cell.centroid()) < 1.0e-6,
             "deterministic per seed"
         );
-        assert!(all_finite(&a[0].1), "render payload went non-finite");
+        assert!(all_finite(&a[0].render), "render payload went non-finite");
     }
 
     #[test]

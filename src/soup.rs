@@ -3,9 +3,10 @@
 //! No asset types, no ECS, no `App` — this half is pure geometry and unit-tests without any of them.
 //! Everything Bevy-shaped lives one module over, in [`crate::mesh`].
 
+use std::collections::HashMap;
 use std::f32::consts::TAU;
 
-use bevy::log::warn;
+use bevy::log::{info, warn};
 use bevy::math::{Vec2, Vec3};
 
 use crate::proxy::ProxyCell;
@@ -175,6 +176,108 @@ fn random_dir(seed: u32) -> Vec3 {
     Vec3::new(r * phi.cos(), z, r * phi.sin())
 }
 
+
+
+/// One fragment mid-fracture: the cell being cut, the render surface clipped alongside it, and any
+/// open shells riding whole.
+pub(crate) struct Piece {
+    pub(crate) cell: ProxyCell,
+    pub(crate) render: Soup,
+    /// Open shells assigned to this fragment and **never clipped** — see [`Shell`].
+    pub(crate) sheets: Vec<Soup>,
+}
+
+/// One connected component of a triangle soup, and whether it is a *solid's* surface or a sheet.
+///
+/// **The distinction AG-003 exists for.** A cape, a hair card, a decal or any single-sided sheet has no
+/// interior. Clipping one against a cut plane cuts it in half, which is wrong twice over: the piece has
+/// no volume for the plane to divide, and the halves fly apart along a seam the artist drew as
+/// continuous. Such a shell is assigned to exactly one fragment and carried **whole**.
+struct Shell {
+    tris: Vec<usize>,
+    /// `true` when the shell has boundary edges — an edge used by exactly one triangle.
+    open: bool,
+    centroid: Vec3,
+}
+
+/// Partition a soup into connected components, welding positions so triangles that merely *share a
+/// corner value* are recognised as adjacent.
+///
+/// **This is the island detection Müller lists as a required step**, not an optimisation — his §3.3
+/// calls it "crucial… it is this step that makes sure that objects collapse in the correct way". Here
+/// it does double duty: it finds the open sheets AG-003 must protect, and it is the same pass a future
+/// compound-fracture would need.
+fn shells(soup: &Soup) -> Vec<Shell> {
+    let q = |x: f32| (x / WELD).round() as i64;
+    let mut vid: HashMap<(i64, i64, i64), usize> = HashMap::new();
+    let mut canon: Vec<usize> = Vec::with_capacity(soup.pos.len());
+    for p in &soup.pos {
+        let key = (q(p.x), q(p.y), q(p.z));
+        let next = vid.len();
+        canon.push(*vid.entry(key).or_insert(next));
+    }
+
+    // Union-find over welded vertices; triangles inherit their component from any corner.
+    let mut parent: Vec<usize> = (0..vid.len()).collect();
+    fn find(parent: &mut Vec<usize>, mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for tri in &soup.idx {
+        let (a, b, c) = (canon[tri[0] as usize], canon[tri[1] as usize], canon[tri[2] as usize]);
+        for (x, y) in [(a, b), (b, c)] {
+            let (rx, ry) = (find(&mut parent, x), find(&mut parent, y));
+            if rx != ry {
+                parent[rx] = ry;
+            }
+        }
+    }
+
+    // Group triangles by root, in first-seen order so the result does not depend on hash iteration.
+    let mut order: Vec<usize> = Vec::new();
+    let mut slot: HashMap<usize, usize> = HashMap::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (t, tri) in soup.idx.iter().enumerate() {
+        let root = find(&mut parent, canon[tri[0] as usize]);
+        let idx = *slot.entry(root).or_insert_with(|| {
+            order.push(root);
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[idx].push(t);
+    }
+
+    groups
+        .into_iter()
+        .map(|tris| {
+            // An edge used once is a boundary edge; any of them makes the shell a sheet.
+            let mut edges: HashMap<(usize, usize), u32> = HashMap::new();
+            let mut sum = Vec3::ZERO;
+            let mut n = 0.0f32;
+            for &t in &tris {
+                let tri = soup.idx[t];
+                let v = [canon[tri[0] as usize], canon[tri[1] as usize], canon[tri[2] as usize]];
+                for i in 0..3 {
+                    let (a, b) = (v[i], v[(i + 1) % 3]);
+                    *edges.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+                }
+                for &i in &tri {
+                    sum += soup.pos[i as usize];
+                    n += 1.0;
+                }
+            }
+            Shell {
+                open: edges.values().any(|&c| c == 1),
+                centroid: if n > 0.0 { sum / n } else { Vec3::ZERO },
+                tris,
+            }
+        })
+        .collect()
+}
+
 /// **The fracture: Tier A cuts, Tier B rides along.**
 ///
 /// Returns one `(cell, render)` pair per fragment. Each cut picks the largest remaining cell by
@@ -201,20 +304,52 @@ pub(crate) fn fracture(
     min_fraction: f32,
     seed: u32,
     impact_dir: Option<Vec3>,
-) -> Vec<(ProxyCell, Soup)> {
-    // Tier B assignment: every triangle goes to the first cell containing its centroid. First, not
-    // nearest — overlapping shells (a head sunk into a torso) are the normal case, and a deterministic
-    // tie-break beats a distance that can flip on a rounding difference.
-    let mut pieces: Vec<(ProxyCell, Soup)> =
-        proxy.iter().map(|c| (c.clone(), Soup::default())).collect();
+) -> Vec<Piece> {
+    // Tier B assignment. Every triangle goes to the first cell containing its centroid — first, not
+    // nearest, because overlapping shells (a head sunk into a torso) are the normal case and a
+    // deterministic tie-break beats a distance that can flip on a rounding difference.
+    //
+    // **Open shells are assigned as a unit and never clipped.** A cape, a hair card or a decal has no
+    // interior for a plane to divide; cutting one in half separates geometry the artist drew as
+    // continuous. See [`Shell`].
+    let mut pieces: Vec<Piece> =
+        proxy.iter().map(|c| Piece { cell: c.clone(), render: Soup::default(), sheets: Vec::new() }).collect();
     let mut homeless = 0usize;
-    for (t, tri) in render.idx.iter().enumerate() {
-        let (a, b, c) = (render.vtx(tri[0]), render.vtx(tri[1]), render.vtx(tri[2]));
-        let mid = (a.pos + b.pos + c.pos) / 3.0;
-        match pieces.iter().position(|(cell, _)| cell.contains(mid)) {
-            Some(i) => pieces[i].1.push_tri(a, b, c, render.tri_interior[t]),
-            None => homeless += 1,
+    let mut carried = 0usize;
+
+    for shell in shells(&render) {
+        if shell.open {
+            let mut whole = Soup::default();
+            for &t in &shell.tris {
+                let tri = render.idx[t];
+                whole.push_tri(
+                    render.vtx(tri[0]),
+                    render.vtx(tri[1]),
+                    render.vtx(tri[2]),
+                    render.tri_interior[t],
+                );
+            }
+            match pieces.iter().position(|p| p.cell.contains(shell.centroid)) {
+                Some(i) => {
+                    pieces[i].sheets.push(whole);
+                    carried += 1;
+                }
+                None => homeless += shell.tris.len(),
+            }
+            continue;
         }
+        for &t in &shell.tris {
+            let tri = render.idx[t];
+            let (a, b, c) = (render.vtx(tri[0]), render.vtx(tri[1]), render.vtx(tri[2]));
+            let mid = (a.pos + b.pos + c.pos) / 3.0;
+            match pieces.iter().position(|p| p.cell.contains(mid)) {
+                Some(i) => pieces[i].render.push_tri(a, b, c, render.tri_interior[t]),
+                None => homeless += 1,
+            }
+        }
+    }
+    if carried > 0 {
+        info!("autogib: carrying {carried} open shell(s) whole rather than cutting them");
     }
     if homeless > 0 {
         warn!(
@@ -228,7 +363,7 @@ pub(crate) fn fracture(
     // sizes — "stop at about 15% of the subject" — and the soup cutter's `min_extent` meant exactly
     // that. Comparing 0.15 against a volume ratio instead would be roughly four times stricter and
     // would silently return far fewer fragments than any existing caller asked for.
-    let whole: f32 = pieces.iter().map(|(c, _)| c.volume()).sum();
+    let whole: f32 = pieces.iter().map(|p| p.cell.volume()).sum();
     let f = min_fraction.max(0.0);
     let floor = whole * f * f * f;
     let mut unsplittable = vec![false; pieces.len()];
@@ -242,11 +377,11 @@ pub(crate) fn fracture(
         // is a function of the geometry alone and not of the vector's incidental layout.
         let Some(i) = (0..pieces.len())
             .filter(|&i| !unsplittable[i])
-            .max_by(|&a, &b| pieces[a].0.volume().total_cmp(&pieces[b].0.volume()).then(b.cmp(&a)))
+            .max_by(|&a, &b| pieces[a].cell.volume().total_cmp(&pieces[b].cell.volume()).then(b.cmp(&a)))
         else {
             break;
         };
-        if pieces[i].0.volume() < floor {
+        if pieces[i].cell.volume() < floor {
             unsplittable[i] = true;
             continue;
         }
@@ -265,18 +400,26 @@ pub(crate) fn fracture(
             }
             _ => base_dir,
         };
-        let plane = Plane { point: pieces[i].0.centroid(), normal };
+        let plane = Plane { point: pieces[i].cell.centroid(), normal };
 
-        let (Some(above), Some(below)) = pieces[i].0.clip(&plane) else {
+        let (Some(above), Some(below)) = pieces[i].cell.clip(&plane) else {
             unsplittable[i] = true;
             continue;
         };
         // Tier B: clip only. No `cap_side`, no loop recovery — the cap is `above`/`below`'s new face.
         let (mut ra, mut rb) = (Soup::default(), Soup::default());
-        split_render(&pieces[i].1, &plane, &mut ra, &mut rb);
+        split_render(&pieces[i].render, &plane, &mut ra, &mut rb);
 
-        pieces[i] = (above, ra);
-        pieces.push((below, rb));
+        // **A sheet goes wholly to one side.** Its centroid lay in the parent cell, so the sign of its
+        // distance to this plane picks a half without ambiguity and without a fallback branch.
+        let (mut sa, mut sb): (Vec<Soup>, Vec<Soup>) = (Vec::new(), Vec::new());
+        for sheet in std::mem::take(&mut pieces[i].sheets) {
+            let c = sheet.pos.iter().copied().sum::<Vec3>() / sheet.pos.len().max(1) as f32;
+            if signed_dist(c, &plane) >= 0.0 { sa.push(sheet) } else { sb.push(sheet) }
+        }
+
+        pieces[i] = Piece { cell: above, render: ra, sheets: sa };
+        pieces.push(Piece { cell: below, render: rb, sheets: sb });
         unsplittable.push(false);
     }
     pieces

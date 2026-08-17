@@ -164,8 +164,8 @@ fn seed_from_path(path: &AssetPath) -> u32 {
 }
 
 /// Turn one finished piece into cached mesh handles. `None` if it draws nothing.
-fn build_fragment(cell: ProxyCell, render: &Soup, meshes: &mut Assets<Mesh>) -> Option<Fragment> {
-    let g = geometry_from_piece(cell, render)?;
+fn build_fragment(piece: crate::soup::Piece, meshes: &mut Assets<Mesh>) -> Option<Fragment> {
+    let g = geometry_from_piece(piece)?;
     Some(Fragment {
         outer_mesh: g.outer.map(|m| meshes.add(m)),
         cap_mesh: g.cap.map(|m| meshes.add(m)),
@@ -375,7 +375,7 @@ pub fn bake_fractures(
         );
         let frags: Vec<Fragment> = pieces
             .into_iter()
-            .filter_map(|(cell, render)| build_fragment(cell, &render, &mut meshes))
+            .filter_map(|piece| build_fragment(piece, &mut meshes))
             .collect();
         info!("autogib: baked {} fragments for {asset_path}", frags.len());
         cache.body.insert(source, frags);

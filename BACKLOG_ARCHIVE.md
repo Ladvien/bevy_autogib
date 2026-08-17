@@ -446,3 +446,33 @@ merged as hard as a position weld would pass a naive count assertion and destroy
 > move geometry this crate promises is reproducible. `MeshBuffer` also carries no UV channel, so the
 > round trip would have had to rebuild UVs through `remap()` regardless. Hand-rolled, with the 27-cell
 > probe that made `Welder` worth citing, and the reasoning recorded on the type.
+
+### ☑ AG-003 · Open shells as a separate class
+
+`shells()` partitions the render soup into connected components (union-find over welded positions) and
+marks any component with a boundary edge as **open**. Open shells are assigned whole to the fragment
+whose cell contains their centroid, kept in `Piece::sheets`, and **never clipped**. On a split they move
+wholly to one side, chosen by the sign of the centroid's distance to the plane — total, deterministic,
+no fallback branch.
+
+`an_open_shell_survives_the_fracture_whole` hangs a single-quad cape on the torso and asserts it comes
+out on **exactly one** fragment with **both** triangles.
+
+> **The danger changed shape between the ticket being written and being done.** AG-003 was written
+> against the old cutter, where the hazard was *capping*: a sheet has no interior, so closing its "cut"
+> emits a degenerate solid. Under Tier A/B nothing caps the render mesh any more, so that specific
+> failure is gone — but the sheet would still have been **clipped** into pieces by every plane crossing
+> it, separating geometry the artist drew as continuous. Same ticket, different mechanism; the fix is
+> the same class distinction either way.
+
+**This is also Müller's island detection**, which he lists as a required step rather than an
+optimisation — *"crucial… it is this step that makes sure that objects collapse in the correct way."*
+The pass does double duty here: it finds the sheets, and it is the same connectivity a compound fracture
+would need.
+
+> **An hour lost to a fixture collision, recorded so the next fixture is placed more carefully.** The
+> first cape sat at `z = -0.16`… no: at `z = -0.17`, which is *exactly* the head box's back face. The
+> test's detector matched the head's own triangles and reported the cape "split across 3 fragments"
+> when it was carried correctly all along. The classification was right from the first run; the
+> assertion was measuring three coplanar surfaces. The cape now sits at `-0.16`, a plane no box face
+> occupies, with the reason written beside it.

@@ -5,7 +5,7 @@
 `docs/research-brief.md` (the open problems), `docs/isomesh-upstream-asks.md` (what we need from the
 validator).
 
-**13 tickets archived, 2 open.** Phase 0 is complete and the Tier A/B cutover has landed. This backlog opens with an architectural change: the crate is going to
+**14 tickets archived, 1 open.** Phase 0 is complete and the Tier A/B cutover has landed. This backlog opens with an architectural change: the crate is going to
 stop cutting the triangle soup.
 
 **Read this before working any ticket below.** This crate is now an independent repository and
@@ -157,7 +157,6 @@ dissolve, and a fix nobody measured beforehand is indistinguishable from a fix t
 
 | | ID | Ticket | Size | Blocked by |
 |---|---|---|---|---|
-| ☐ | **AG-003** | **Open shells as a separate class.** Capes, hair cards, decals and single-sided sheets have no interior, so they have no proxy cell and must **never be cut and capped** — capping a sheet produces a degenerate solid and the current code will try. Assign each open shell to a fragment by proximity and carry it whole.<br>**Acceptance:** a single-quad "cape" fixture attached to the torso+head fixture survives a fracture intact, attached to exactly one fragment, with no cap triangles generated for it. | M | AG-001 |
 
 ---
 
