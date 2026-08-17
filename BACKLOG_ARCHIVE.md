@@ -87,3 +87,47 @@ touches both and should re-check they still agree.
 
 **This test is expected to go red when AG-001 lands, and that is the deliverable** — it is the baseline
 half of a pre-registered prediction, not a target. AG-004 retires it.
+
+### ☑ AG-002 · Hollow-prism fixture — make the invisible bug measurable
+
+`hollow_prism` (3×3 outer square, 1×1 bore, closed, manifold, genus 1, χ = 0) now sits beside `u_prism`
+in `src/audit.rs`, and `known_defect_nested_cut_boundary_is_filled_solid` cuts it and pins what happens.
+
+> **Falsified premise — most of the pre-registered prediction.** AG-002 predicted the capper would
+> "conserve χ and manifoldness while overstating volume by exactly (bore cross-section area × length)",
+> and that *"every `MeshReport` field reports it healthy and only volume notices."* Measured across 24
+> configurations — two depths × two bore areas × four cut heights × both sides — three of those four
+> claims are wrong:
+>
+> - **χ is not conserved.** A correctly cut piece of a tube is still a tube: genus 1, χ = 0. Every
+>   emitted piece reports **χ = 2**. Filling a bore *is* a genus reduction, so χ is precisely the field
+>   that sees it.
+> - **`inconsistently_oriented_edges` is 8, never 0**, so `supports_inside_outside` is false. Two fields
+>   notice the defect, not zero.
+> - **Volume is the field that misses it.** Cut through the origin and the un-recentred volume of the
+>   emitted piece is `8.0` — exactly right. The two same-facing sheets over the bore cancel against the
+>   rim walls.
+> - **Manifoldness is conserved.** `non_manifold_edges` and `non_manifold_vertices` stay 0. This half
+>   held.
+>
+> The overstatement is real but not what the ticket described: **`bore_area × length / 3`**, exact in
+> all 24 cases.
+
+> **Second falsified premise, found while chasing the first — and this one was a false claim in our own
+> source.** That `/3` is an artefact of *recentring*, not a measurement of the defect. The doc on
+> `FragmentAudit::signed_volume` asserted "recentering does not change it". Translation preserves the
+> divergence-theorem sum only for a surface that is closed **and consistently oriented**; this one is
+> not, and `geometry_from_soup` recentres every fragment on its bbox before the audit ever sees it. So
+> the reported volume of an inconsistently-oriented fragment is offset by an amount depending on where
+> the fragment happened to sit — and the offset is a tidy enough number to be mistaken for a
+> measurement. The doc comment is corrected in the same commit, and now states the two conditions under
+> which the field means anything.
+
+**What the test asserts instead of volume:** **cap area**, which is translation-invariant and checkable
+by hand. The outer fan paves the whole 3×3 square, bore included; the bore's own fan then paves the bore
+a second time. Emitted area is `outer + bore = 10` where the truth is `outer − bore = 8` — over by
+exactly `2 × bore`, which is also the mechanism stated in one line.
+
+**Ticket amended:** the un-recentred volume assertion is kept *as the falsified half*, with a comment
+saying that if it ever fails, the prediction may have become true and the comment is what needs
+revisiting. AG-008 flips the rest.

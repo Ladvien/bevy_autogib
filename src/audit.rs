@@ -98,15 +98,30 @@ pub struct FragmentAudit {
     /// pseudo-normals from it. **This is the strong "it is really a solid" answer.**
     pub supports_inside_outside: bool,
 
-    /// Signed volume of the welded surface, `(1/6)·Σ (a × b)·c`.
+    /// Signed volume of the welded surface, `(1/6)·Σ (a × b)·c`. Negative means inside out.
     ///
-    /// **The only field here that can see a wrongly-filled hole.** If a cut passes through a hollow
-    /// and the inner boundary loop is capped as a solid disc instead of punched out, the result is a
-    /// perfectly ordinary closed manifold — two faces per edge, consistent winding, `χ = 2`. Every
-    /// topological field above reports it clean, because it *is* clean; it is simply the wrong solid.
-    /// Volume is the invariant that notices, and it is only meaningful when [`Self::is_closed`].
+    /// **Read this before trusting the number. Two claims that used to live here were measured and
+    /// found false** — by `known_defect_nested_cut_boundary_is_filled_solid`, which exists to pin them.
     ///
-    /// Negative means the surface is inside out. Recentering does not change it.
+    /// It said this was *"the only field here that can see a wrongly-filled hole"*, and that a cut
+    /// through a hollow whose inner loop is capped solid would come back a perfectly ordinary closed
+    /// manifold that only volume could indict. Neither holds. Filling a bore is a **genus reduction**,
+    /// so [`Self::euler_characteristic`] moves (0 → 2 on that fixture); and the paving disagrees with
+    /// the bore wall about which way is out, so [`Self::inconsistently_oriented_edges`] goes positive
+    /// and [`Self::supports_inside_outside`] goes false. Volume, measured where the geometry actually
+    /// sits, came back *exactly correct* — the two same-facing sheets over the bore cancel against the
+    /// rim walls. It is the field that misses that defect, not the field that catches it.
+    ///
+    /// It also said *"recentering does not change it"*. Translation preserves this sum only for a
+    /// surface that is closed **and consistently oriented**; drop the second condition and it does not.
+    /// Since [`crate::mesh::FragmentGeometry`] is recentred on its bbox before it ever reaches here,
+    /// **the volume reported for an inconsistently-oriented fragment is offset by an amount that
+    /// depends on where the fragment happened to sit.** On the hollow prism that offset is a tidy
+    /// `bore_area × length / 3` in all 24 configurations tested, which is exactly the kind of clean
+    /// number that invites being mistaken for a measurement of the defect. It is not one.
+    ///
+    /// So: meaningful when [`Self::is_closed`] **and** `inconsistently_oriented_edges == 0`. Outside
+    /// that, it is a number, not a volume.
     pub signed_volume: f32,
 }
 
@@ -336,6 +351,80 @@ mod tests {
         s
     }
 
+    /// Outer boundary of the hollow prism's cross-section: a 3×3 square, CCW in XY.
+    const BORE_OUTER: [[f32; 2]; 4] = [[-1.5, -1.5], [1.5, -1.5], [1.5, 1.5], [-1.5, 1.5]];
+    /// Inner boundary — the bore: a 1×1 square, also written CCW. It is *walked in reverse* when the
+    /// bore walls are built, which is what turns it into a hole rather than a second solid.
+    const BORE_INNER: [[f32; 2]; 4] = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]];
+
+    /// Cross-section area of the hollow prism: a 3×3 square less its 1×1 bore.
+    ///
+    /// Both this and [`BORE_HOLE_AREA`] describe `hollow_prism(_, 0.5)`, the only configuration the
+    /// committed test uses. `bore_half` stays a parameter so the `bore_area × length / 3` result
+    /// recorded on `known_defect_nested_cut_boundary_is_filled_solid` can be re-derived rather than
+    /// taken on trust.
+    const BORE_SECTION_AREA: f32 = 9.0 - 1.0;
+    /// Cross-section area of the bore alone — the region a fan will wrongly fill.
+    const BORE_HOLE_AREA: f32 = 1.0;
+
+    /// A **hollow** square prism: closed, manifold, and genus 1 (χ = 0).
+    ///
+    /// **The fixture `u_prism` cannot replace.** A U-section is non-convex but *simply connected*, so
+    /// its cut boundary is one loop. This one's cut boundary is **two nested loops**, and nesting is a
+    /// property no counter in `MeshReport` looks for: a cap that fills the bore solid can still be
+    /// closed and consistently wound. It would simply be the wrong solid, and
+    /// [`FragmentAudit::signed_volume`] is the field most likely to notice.
+    ///
+    /// Winding, stated because it is the thing that makes it a hole: the outer wall takes its
+    /// orientation from [`BORE_OUTER`] as written, and the bore wall walks [`BORE_INNER`] **in
+    /// reverse**, so its faces point into the bore — which is *outward* from the solid. Both end caps
+    /// are annuli, triangulated by hand rather than fanned, for the same reason `U_TRIS` is.
+    fn hollow_prism(half_depth: f32, bore_half: f32) -> Soup {
+        let mut s = Soup::default();
+        let v = |p: Vec3| crate::soup::Vtx { pos: p, nrm: Vec3::ZERO, uv: bevy::math::Vec2::ZERO };
+        let o = |i: usize, z: f32| Vec3::new(BORE_OUTER[i][0], BORE_OUTER[i][1], z);
+        let n = |i: usize, z: f32| Vec3::new(BORE_INNER[i][0] * bore_half * 2.0, BORE_INNER[i][1] * bore_half * 2.0, z);
+
+        // Outer wall: same construction as `u_prism`, faces away from the solid.
+        for i in 0..4 {
+            let j = (i + 1) % 4;
+            s.push_tri(v(o(i, -half_depth)), v(o(j, -half_depth)), v(o(j, half_depth)), false);
+            s.push_tri(v(o(i, -half_depth)), v(o(j, half_depth)), v(o(i, half_depth)), false);
+        }
+        // Bore wall: the inner outline walked backwards, so these faces point into the hole.
+        for i in 0..4 {
+            let j = (i + 3) % 4; // the previous vertex — the next one going backwards
+            s.push_tri(v(n(i, -half_depth)), v(n(j, -half_depth)), v(n(j, half_depth)), false);
+            s.push_tri(v(n(i, -half_depth)), v(n(j, half_depth)), v(n(i, half_depth)), false);
+        }
+        // End caps, as annuli: each side of the square contributes a quad spanning outer to inner.
+        for i in 0..4 {
+            let j = (i + 1) % 4;
+            // +Z, wound CCW seen from +Z.
+            s.push_tri(v(o(i, half_depth)), v(o(j, half_depth)), v(n(j, half_depth)), false);
+            s.push_tri(v(o(i, half_depth)), v(n(j, half_depth)), v(n(i, half_depth)), false);
+            // -Z, reversed.
+            s.push_tri(v(o(j, -half_depth)), v(o(i, -half_depth)), v(n(j, -half_depth)), false);
+            s.push_tri(v(n(j, -half_depth)), v(o(i, -half_depth)), v(n(i, -half_depth)), false);
+        }
+        s
+    }
+
+
+    /// Signed volume of a soup's triangles **as they sit**, with no recentring — the same
+    /// `(1/6)·Σ (a × b)·c` the audit uses.
+    ///
+    /// Exists because the difference between this and [`FragmentAudit::signed_volume`] is itself a
+    /// finding; see `known_defect_nested_cut_boundary_is_filled_solid`.
+    fn soup_volume(s: &Soup) -> f32 {
+        let mut v6 = 0.0f32;
+        for tri in &s.idx {
+            let (a, b, c) = (s.pos[tri[0] as usize], s.pos[tri[1] as usize], s.pos[tri[2] as usize]);
+            v6 += a.cross(b).dot(c);
+        }
+        v6 / 6.0
+    }
+
     /// Total area of a soup's cut-cap triangles.
     fn cap_area(s: &Soup) -> f32 {
         s.idx
@@ -371,6 +460,110 @@ mod tests {
         ];
         // `extent` is the merged solid's largest bounding half-dimension; `MIN_FRACTION` is 0.15.
         fracture_mesh(&placed, 12, 0.67 * 0.15, 0x00C0_FFEE, None)
+    }
+
+    /// **AG-002 — a cut through a hollow fills the bore. Asserts the bug is still here.**
+    ///
+    /// One plane through [`hollow_prism`] produces a cut boundary of **two nested loops** — the outer
+    /// rim and the bore rim. `assemble_loops` returns them as two independent loops and `cap_side` fans
+    /// each one *solid*, with no notion that one lies inside the other. The outer fan therefore paves
+    /// the entire outer square, bore included, and the bore's own fan paves the bore a second time.
+    ///
+    /// # The pre-registered prediction was mostly wrong, and that is recorded rather than quietly fixed
+    ///
+    /// AG-002 predicted the capper would "conserve χ and manifoldness while overstating volume by
+    /// exactly (bore cross-section area × length)", and that *"every `MeshReport` field reports it
+    /// healthy and only volume notices."* Measured, across 24 configurations (two depths × two bore
+    /// areas × four cut heights × both sides):
+    ///
+    /// - **χ is not conserved.** A correctly cut piece is still a tube: genus 1, χ = 0. Every emitted
+    ///   piece reports **χ = 2**. Filling the bore is precisely a genus reduction, so χ sees it.
+    /// - **`inconsistently_oriented_edges` is 8, never 0**, so `supports_inside_outside` is false. Two
+    ///   fields notice, not zero fields.
+    /// - **Manifoldness is conserved** — `non_manifold_edges` and `non_manifold_vertices` stay 0. That
+    ///   half of the prediction held.
+    /// - **Volume is the field that does *not* notice.** Cut this fixture through the origin and
+    ///   [`soup_volume`] of the emitted piece is `8.0` — exactly right. The bore is paved twice with
+    ///   opposite-facing... no: with *same*-facing sheets whose flux cancels against the rim walls.
+    ///
+    /// The audit's volume *does* differ from the truth, by an exact `bore_area × length / 3` in all 24
+    /// cases — but **that is an artefact of recentring, not a measurement of the defect.**
+    /// `geometry_from_soup` recentres each fragment on its bbox, and translation only preserves the
+    /// divergence-theorem sum for a surface that is closed *and consistently oriented*. This one is not.
+    /// The doc on [`FragmentAudit::signed_volume`] claimed "recentering does not change it"; that was
+    /// corrected in this commit, because it is false for exactly the surfaces the field exists to judge.
+    ///
+    /// # What this test asserts instead
+    ///
+    /// **Cap area**, which is translation-invariant and checkable by hand: the emitted cap is
+    /// `outer + bore` where the truth is `outer − bore`, so it is over by exactly `2 × bore`. AG-008's
+    /// flood fill over a PSLG is what fixes it, and when it does, flip each assertion as its message
+    /// says.
+    #[test]
+    fn known_defect_nested_cut_boundary_is_filled_solid() {
+        const OUTER_AREA: f32 = 9.0; // the 3×3 outer square
+        let whole = hollow_prism(1.0, 0.5);
+
+        // The fixture must itself be the solid it claims to be, or nothing below means anything.
+        let wg = geometry_from_soup(&whole).expect("the fixture draws something");
+        let wa = audit_fragment(&wg).expect("the fixture can be audited");
+        assert!(wa.is_closed() && wa.is_manifold(), "the hollow-prism fixture is not a closed manifold: {wa:?}");
+        assert_eq!(wa.euler_characteristic, 0, "the fixture should be genus 1 (χ = 0): {wa:?}");
+        assert_eq!(wa.genus, Some(1), "the fixture should have exactly one hole: {wa:?}");
+        assert!(
+            (wa.signed_volume - BORE_SECTION_AREA * 2.0).abs() < 1.0e-3,
+            "the fixture encloses {}, but a 3×3 prism of depth 2 less a 1×1 bore is {}",
+            wa.signed_volume,
+            BORE_SECTION_AREA * 2.0
+        );
+
+        // One cut, perpendicular to the extrusion, so the cross-section is the annulus itself.
+        let (above, _) = split_soup(&whole, &Plane { point: Vec3::ZERO, normal: Vec3::Z });
+        assert!(!above.is_empty(), "the hollow-prism fixture did not cut");
+
+        // The primary assertion: the bore is paved rather than punched out.
+        let area = cap_area(&above);
+        assert!(
+            (area - (OUTER_AREA + BORE_HOLE_AREA)).abs() < 1.0e-3,
+            "cap area is {area}; the fan paves the outer square ({OUTER_AREA}) and then paves the bore \
+             again ({BORE_HOLE_AREA}), for {}. The true annulus is {}. If the capper was fixed, change \
+             this to `assert!((area - {}).abs() < 1e-3)`.",
+            OUTER_AREA + BORE_HOLE_AREA,
+            BORE_SECTION_AREA,
+            BORE_SECTION_AREA
+        );
+
+        let a = audit_fragment(&geometry_from_soup(&above).expect("the cut piece draws"))
+            .expect("the cut piece can be audited");
+        assert_eq!(
+            a.euler_characteristic, 2,
+            "χ is no longer 2. A correctly cut piece of a tube is still a tube — genus 1, χ = 0 — so if \
+             the capper was fixed, change this to `assert_eq!(a.euler_characteristic, 0)` and assert \
+             `genus == Some(1)`. Audit: {a:?}"
+        );
+        assert!(
+            a.inconsistently_oriented_edges > 0,
+            "the filled bore no longer shows as inconsistent edge orientation. If the capper was fixed, \
+             change this to `assert_eq!(a.inconsistently_oriented_edges, 0)`. Audit: {a:?}"
+        );
+        assert!(
+            !a.supports_inside_outside,
+            "the piece is now solid enough for inside/outside queries; flip this assertion. Audit: {a:?}"
+        );
+        // Manifoldness and closedness survive — the half of AG-002's prediction that held.
+        assert!(a.is_closed(), "the filled bore should still leave a closed surface: {a:?}");
+        assert!(a.is_manifold(), "the filled bore should not create non-manifold edges: {a:?}");
+
+        // **The falsified half, pinned so it cannot be quietly re-asserted.** Volume, measured where the
+        // fragment actually sits, is *correct* — so `signed_volume` is not the field that catches this.
+        let raw = soup_volume(&above);
+        assert!(
+            (raw - BORE_SECTION_AREA).abs() < 1.0e-3,
+            "un-recentred volume is {raw}, expected {BORE_SECTION_AREA}. AG-002 predicted volume would \
+             be the field that notices a filled bore; measured, it is not — the paving cancels against \
+             the rim walls. If this ever fails, the *prediction* may have become true and this comment \
+             is what needs revisiting, not just the number."
+        );
     }
 
     /// **AG-012 — a baseline, not a target. Read the second paragraph before you touch it.**
