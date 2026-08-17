@@ -200,3 +200,39 @@ SDF backend stops being the route to correct fragments.
 scoped to hand-roll it. Ask 1 is **not granted as written** — `TriangleGrid` is still `pub(crate)`;
 upstream solved it a level up by exporting `MeshField` and keeping the grid private. Asks 4 and 5 are
 untouched.
+
+### ☑ AG-013 · Settle the isomesh pin
+
+**Bumped, `4369e3c` → `22c3b35`.** Decided by measurement, as the ticket required.
+
+**What it cost: exactly one re-blessed number, and it was a correction rather than a regression.**
+The torso+head baseline's collider-ready count went **4 → 1**. `supports_inside_outside` gained a
+`non_manifold_vertices == 0` clause; the old policy checked boundary edges, non-manifold *edges* and
+orientation but let a **bowtie vertex** through — and a bowtie breaks the pseudonormal construction
+exactly as a bad edge does. **Ten of the twelve fragments carry one**, which is the torso/head seam
+surfacing as a vertex fault rather than an edge fault. So the old 4 was an overcount, this crate had
+published it in `docs/research-brief.md`, and that table is corrected in the same commit.
+
+**The pre-registered falsifier did not fire.** AG-013 said it would be falsified if the bump changed
+emitted *geometry* rather than only reported topology. Watertight (7), manifold (2), open cut edges (22)
+and enclosed volume (0.1971) are all unmoved, and the re-fracture is still bit-identical. That is the
+expected result rather than a lucky one: the fracture is `soup.rs` and this dependency only ever
+measures it — which is the claim `tests/leaf.rs` makes when it admits `isomesh` at all.
+
+**What it bought:** `weld_split_by` (`weld.rs:338`), the composite-key weld **AG-005 was scoped to
+hand-roll**; and a public `predicates` module with `orient2d` and `incircle` — Shewchuk's robust
+predicates, which is the floor **AG-008**'s constrained Delaunay triangulator stands on. Still `no_std`
+with `libm` as its only dependency, so `tests/leaf.rs` needed no widening.
+
+> **Falsified premise, and it cost the first twenty minutes of this ticket.** AG-013 was written against
+> "isomesh is 229 commits ahead at `9a321b1`". That commit is in the **sibling working copy and was
+> never pushed** — a git dependency cannot resolve a commit that exists on one machine. `origin/main` is
+> `22c3b35`, a *different and further-along* lineage. The lesson generalises past this ticket: we had
+> already been burnt once by reading a stale mirror of our own crate (A-1), and this is the same mistake
+> with the repositories swapped — reading a working copy and calling it upstream.
+
+> **Unlooked-for confirmation of Phase 1.** isomesh's own `T-022` splits a CDT ticket in two, and its
+> note reaches our Tier A conclusion independently: *"under the Tier A architecture a cap is a plane
+> intersected with a convex cell, which is provably a convex polygon and needs no CDT at all."* Two
+> code bases arrived at the same architecture from opposite ends. It also means AG-008 stays what its
+> own ticket says it is — a safety net, over-engineered on purpose — rather than the main event.

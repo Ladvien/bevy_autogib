@@ -38,8 +38,16 @@ this crate shipped with says *"12 of 12 fragments carry at least one closed cut 
 |---|---|
 | watertight (zero boundary edges) | **7 of 12** |
 | manifold | **2 of 12** |
-| collider-ready (closed + manifold + oriented) | **4 of 12** |
+| collider-ready (closed + manifold + oriented + no bowties) | **1 of 12** |
 | open cut edges, total | 22 |
+
+> **Corrected, 2026-08-16 (AG-013).** This table published **4 of 12** collider-ready until the `isomesh`
+> pin moved from `4369e3c` to `22c3b35`. The old figure was an overcount, not a regression: that rev's
+> `supports_inside_outside` checked boundary edges, non-manifold *edges* and orientation, but **not
+> non-manifold vertices** — and a bowtie vertex breaks the pseudonormal construction exactly as an edge
+> does. **Ten of the twelve fragments carry a bowtie**, which is the torso/head seam surfacing as a
+> vertex fault rather than an edge one. No emitted geometry changed: the fracture is `soup.rs` and owes
+> `isomesh` nothing. Every other figure in this table is unmoved.
 
 **A U-prism (closed, manifold, *non-convex*), cut perpendicular to its extrusion.** The cap comes back
 larger than the cross-section it is supposed to close, and reports inconsistently oriented edges.

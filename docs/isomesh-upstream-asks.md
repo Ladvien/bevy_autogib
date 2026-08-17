@@ -4,12 +4,10 @@ Written from the consuming side, against `isomesh` at `4369e3c` — the rev `Car
 says what autogib does with it and what stays blocked without it, so the priority argument is legible
 rather than asserted.
 
-> **Status, and read it before acting on any ask below.** isomesh's `HEAD` is **229 commits past the rev
-> we pin**, and three of these five have been answered there without us noticing. Nothing in this
-> document affects a build until the pin moves, which is a deliberate decision recorded in `Cargo.toml`
-> and now a ticket of its own (**AG-013**). Current state, verified at both revs:
+> **Status. Updated by AG-013, which moved the pin to `22c3b35` (`origin/main`).** Three of these five
+> have been answered upstream. Current state, verified at both revs:
 >
-> | Ask | At `4369e3c` (pinned) | At `HEAD` |
+> | Ask | At `4369e3c` (the old pin) | At `22c3b35` (pinned now) |
 > |---|---|---|
 > | 1 — `TriangleGrid` public | `pub(crate)` | **still `pub(crate)`** — not granted as written |
 > | 2 — mesh field | absent | **`MeshField` exists**, but pseudonormal-signed, not winding-signed |
@@ -17,11 +15,21 @@ rather than asserted.
 > | 4 — convex decomposition | absent | still absent, and still declined |
 > | 5 — fold inside a fan | absent | still absent |
 >
-> **A separate correction, carried into `BACKLOG.md` as "correction #2".** The `S-001…S-007` tickets
-> this document argues against were **uncommitted intent** at the time of our audit, not shipped
-> capability — `signed_distance_from_mesh_winding` and `SampledField` did not exist at `4369e3c`. They
-> exist at `HEAD` now. So the claim we corrected was wrong about *when*, not about *what*, and the
-> correction needs that qualifier or it becomes wrong itself.
+> Also new and not an ask: a public `predicates` module with `orient2d` and `incircle` — Shewchuk's
+> robust predicates, which is the floor AG-008's constrained Delaunay triangulator stands on. isomesh's
+> own `T-022a` is a CDT ticket, not shipped code; **its note independently reaches our Tier A
+> conclusion** — "under the Tier A architecture a cap is a plane intersected with a convex cell, which
+> is provably a convex polygon and needs no CDT at all."
+>
+> **Two corrections about *where* upstream's work lives, both of which cost us time.** The sibling
+> working copy at `~/isomesh` had an `HEAD` 229 commits past the old pin that was **never pushed**, and
+> a git dependency cannot resolve a commit that exists on one machine. `origin/main` is a different and
+> further-along lineage. Read the remote, not the working copy.
+>
+> **And the correction carried into `BACKLOG.md` as "correction #2" needs a qualifier of its own.** The
+> `S-001…S-007` tickets this document argues against were **uncommitted intent** at the time of our
+> audit — `signed_distance_from_mesh_winding` and `SampledField` did not exist at `4369e3c`. They exist
+> now. So the claim we corrected was wrong about *when*, not about *what*.
 
 **Context.** autogib pre-fractures a mesh by recursively plane-cutting a triangle soup and capping each
 cut. isomesh is now a real dependency of it (`no_std`, one transitive dep, `[f32; 3]` public API — that

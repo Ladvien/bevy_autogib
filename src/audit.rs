@@ -482,7 +482,7 @@ mod tests {
         fracture_mesh(&placed, 12, 0.67 * 0.15, 0x00C0_FFEE, None)
     }
 
-    /// **AG-006 — a fan can fold with both counters reading zero.**
+    /// **AG-006 — a fan can fold with every counter reading zero.**
     ///
     /// `docs/isomesh-upstream-asks.md` §5 offered upstream a cheap exact fold detector:
     ///
@@ -687,13 +687,22 @@ mod tests {
         let manifold = audits.iter().filter(|a| a.is_manifold()).count();
         let collider_ready = audits.iter().filter(|a| a.supports_inside_outside).count();
         let open_edges: u64 = audits.iter().map(|a| a.boundary_edges).sum();
+        let bowties = audits.iter().filter(|a| a.non_manifold_vertices > 0).count();
 
         let note = "AG-012 baseline moved. This is not a test to re-bless — name the change that moved \
                     it, in the commit. AG-001 is the ticket allowed to move it, and AG-004 retires it.";
         assert_eq!(watertight, 7, "watertight fragments: {note}");
         assert_eq!(manifold, 2, "manifold fragments: {note}");
-        assert_eq!(collider_ready, 4, "collider-ready fragments: {note}");
         assert_eq!(open_edges, 22, "total open cut edges: {note}");
+        // **Re-blessed once, by AG-013, and the reason is on the record.** This read `4` under isomesh
+        // `4369e3c`, whose `supports_inside_outside` checked boundary edges, non-manifold *edges* and
+        // orientation — but not non-manifold *vertices*. A bowtie vertex breaks the pseudonormal
+        // construction exactly as an edge does, so the old 4 was an overcount and this crate published
+        // it. `22c3b35` adds the missing clause and the honest figure is 1.
+        assert_eq!(collider_ready, 1, "collider-ready fragments: {note}");
+        // Pinned because it is what explains the line above: ten of twelve fragments carry a bowtie,
+        // which is the seam between two closed shells showing up as a vertex fault.
+        assert_eq!(bowties, 10, "fragments with non-manifold vertices: {note}");
     }
 
     /// **The crate's central promise, tested against every byte for the first time.**

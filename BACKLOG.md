@@ -5,7 +5,7 @@
 `docs/research-brief.md` (the open problems), `docs/isomesh-upstream-asks.md` (what we need from the
 validator).
 
-**6 tickets archived, 9 open.** This backlog opens with an architectural change: the crate is going to
+**7 tickets archived, 8 open.** This backlog opens with an architectural change: the crate is going to
 stop cutting the triangle soup.
 
 **Read this before working any ticket below.** This crate is now an independent repository and
@@ -151,7 +151,6 @@ dissolve, and a fix nobody measured beforehand is indistinguishable from a fix t
 | | ID | Ticket | Size | Blocked by |
 |---|---|---|---|---|
 | ☐ | **AG-009** | **Retire the monorepo's copy of this crate.** *Rewritten — the original ticket ("re-split and push the public mirror") was **void**: it presumed a mirror relationship that no longer exists, and it was undoable as written, because `git subtree split` carries commits and `src/audit.rs` had none. See `BACKLOG_ARCHIVE.md`, A-1.*<br><br>This repository is now the source of truth, so `foundation_vs_slop/crates/bevy_autogib/` is a corpse that will silently diverge. In the monorepo root `Cargo.toml`: drop `"crates/bevy_autogib"` from `[workspace] members`, and replace the path dependency with `bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "…" }`. Then delete the directory. Consumers are `src/autogib.rs` and `src/gore.rs`.<br>**Watch the feature forward:** the `test-harness` feature forwards `bevy_autogib/strict-order`, which is what keeps the vertex-soup tie check alive in a release-built harness. A git dependency forwards features exactly as a path dependency does, but verify it rather than assume — `cargo test --features test-harness` in the monorepo.<br>**Acceptance:** the monorepo builds and tests with no `crates/bevy_autogib` on disk; `strict-order` still reaches the crate. | S | — |
-| ☐ | **AG-013** | **Settle the isomesh pin — bump it or write down why not.** *New ticket.* `Cargo.toml` pins `rev = "4369e3c"` and says to bump it deliberately, in a commit that re-blesses the locked topology counts, or not at all. That decision is now due, because **isomesh is 229 commits ahead** and three of the five asks in `docs/isomesh-upstream-asks.md` have been answered upstream without us noticing.<br><br>What moved: **Ask 3 is granted** — `weld_split_by` (`weld.rs:338`) is the attribute-aware weld AG-005 was going to hand-roll. `MeshField`, `SampledField` and `signed_distance_from_mesh_winding` all exist now. **Ask 1 was not granted as written** (`TriangleGrid` is still `pub(crate)`); Ask 5 is untouched.<br><br>**This is a measurement, not a preference.** Bump on a branch and run the suite: `fracture_output_is_bit_identical_across_runs` is the one that decides it, since the welder feeds the audit and a welder change moves what the audit reports. Record what moved either way — including "nothing moved", which is the outcome that makes the bump cheap.<br>**Falsified if** the bump changes emitted *geometry* rather than only reported topology: the crate's fracture owes isomesh nothing and must not start owing it here.<br>**Acceptance:** the pin is either bumped with re-blessed counts in the same commit, or left alone with the reason recorded in `Cargo.toml` beside it. AG-005 reads the outcome. | M | — |
 
 ---
 
