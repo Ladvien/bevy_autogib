@@ -16,7 +16,7 @@
 
 use bevy::math::{Mat4, Vec3, primitives::Cuboid};
 use bevy::mesh::Mesh;
-use bevy_autogib::{BondSet, FragmentGeometry, ProxyCell, fracture_mesh};
+use bevy_autogib::{BondSet, CutSettings, FragmentGeometry, ProxyCell, fracture_mesh};
 
 /// Target fragment count. The ECS bake derives this from the mesh's bounding size and the
 /// `FractureSettings` dials; here it is spelled out so one number can be varied at a time.
@@ -25,6 +25,13 @@ const TARGET: usize = 12;
 const MIN_FRACTION: f32 = 0.15;
 /// How many cuts deep the hierarchy may go — slack enough here that `TARGET` is what binds.
 const MAX_DEPTH: u16 = 64;
+
+/// The geometry dials for this example's bake. `plane_jitter` and `size_spread` are what keep the
+/// pieces from all coming out the same size — at `0.0` each cut halves its piece through the centre
+/// and the result reads as uniform shards rather than debris.
+fn cut(seed: u32) -> CutSettings {
+    CutSettings { max_depth: MAX_DEPTH, ..CutSettings::new(TARGET, MIN_FRACTION, seed) }
+}
 
 fn tri_count(mesh: Option<&Mesh>) -> usize {
     mesh.and_then(|m| m.indices()).map_or(0, |i| i.len() / 3)
@@ -61,7 +68,7 @@ fn main() {
     // **Timed, because `AG-011` asked whether the bake needs to move off the main thread and the honest
     // answer is a number rather than an opinion.** A fix is warranted at 50 ms and not at 5 ms.
     let started = std::time::Instant::now();
-    let baked = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, MAX_DEPTH, seed);
+    let baked = fracture_mesh(&parts, &proxy, &cut(seed));
     let elapsed = started.elapsed();
 
     // **One bake, every granularity.** The cut loop keeps each piece it split rather than
@@ -114,9 +121,12 @@ fn main() {
         return;
     }
 
-    let peak = pieces.iter().map(|p| p.half_extents.max_element()).fold(0.0f32, f32::max);
+    // **Volume, not max half-extent.** How big a chunk *is* is how much stuff it holds; a bar keyed
+    // on the longest axis reads every slab as large and hides the size distribution entirely — which
+    // is the one thing `plane_jitter` and `size_spread` exist to change.
+    let peak = pieces.iter().map(|p| p.cell.volume()).fold(0.0f32, f32::max);
 
-    println!("   #   centre (x, y, z)          half-extents         skin    cap   size");
+    println!("   #   centre (x, y, z)          half-extents         skin    cap   volume");
     println!("  ─────────────────────────────────────────────────────────────────────────────────");
     let mut total_skin = 0;
     let mut total_cap = 0;
@@ -136,7 +146,7 @@ fn main() {
             p.half_extents.z,
             skin,
             cap,
-            bar(p.half_extents.max_element(), peak, 12),
+            bar(p.cell.volume(), peak, 12),
         );
     }
     println!("  ─────────────────────────────────────────────────────────────────────────────────");
@@ -200,7 +210,7 @@ fn main() {
     println!();
 
     // Same seed, same pieces — the property the whole crate is built around.
-    let again = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, MAX_DEPTH, seed).into_leaves();
+    let again = fracture_mesh(&parts, &proxy, &cut(seed)).into_leaves();
     let identical = again.len() == pieces.len()
         && again
             .iter()

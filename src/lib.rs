@@ -24,7 +24,60 @@ pub use tree::{FragmentId, FragmentTree, TreeNode};
 
 use bevy::prelude::*;
 
-/// How hard to break things. Six dials, all bake-time — nothing here decides how a chunk *moves*
+/// **The geometry dials for one bake**, without the ECS sizing policy that chooses `target`.
+///
+/// [`FractureSettings`] is the resource a game authors once; this is what a single cut actually
+/// needs, and it is what [`fracture_mesh`] takes. Build one from a `FractureSettings` with
+/// [`FractureSettings::cut_for`], or write it out directly when there is no `App` in sight.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CutSettings {
+    /// Finest fragment count to cut down to.
+    pub target: usize,
+    /// Stop cutting a piece once its extent drops below this fraction of the whole subject's.
+    pub min_fraction: f32,
+    /// Cuts from a proxy cell to the finest fragment — the hierarchy's memory bound.
+    pub max_depth: u16,
+    /// **How far a cut plane may slide off the piece's centre**, as a fraction of how far the piece
+    /// reaches along that plane's own normal.
+    ///
+    /// `0.0` puts every plane exactly through the centroid, which splits every piece near enough in
+    /// half and is why an unjittered bake reads as uniform shards rather than debris. Real fragment
+    /// volumes follow Mott's distribution — many small, few large — and an off-centre cut is what
+    /// produces that spread, compounding with depth.
+    ///
+    /// Measured against the piece's own span along the normal rather than its bounding box, so the
+    /// plane cannot slide out of a cell that is thin in that direction and lose the cut. Values at
+    /// or above `1.0` are refused by [`FractureSettings::validate`] for that reason.
+    pub plane_jitter: f32,
+    /// **How much the "cut the biggest piece next" rule may be nudged**, so the sequence does not
+    /// march down a strict volume order and level every piece toward the same size.
+    ///
+    /// `0.0` is the strict largest-first rule. Higher values let a slightly smaller piece be chosen,
+    /// widening the size distribution. The nudge is a stable hash of the piece's own node id, so it
+    /// is reproducible and does not shift as the frontier grows.
+    pub size_spread: f32,
+    /// Drives every plane direction and every jitter draw — the only source of variation.
+    pub seed: u32,
+}
+
+impl CutSettings {
+    /// The three dials a caller always has an opinion about, with [`FractureSettings`]'s shipped
+    /// defaults for the rest. Assign to the remaining fields to change them.
+    pub fn new(target: usize, min_fraction: f32, seed: u32) -> Self {
+        let d = FractureSettings::default();
+        CutSettings {
+            target,
+            min_fraction,
+            max_depth: d.max_depth,
+            plane_jitter: d.plane_jitter,
+            size_spread: d.size_spread,
+            seed,
+        }
+    }
+}
+
+/// How hard to break things. Eight dials, all bake-time — nothing here decides how a chunk *moves*
 /// after it exists, because that is the caller's physics, not this crate's business.
 ///
 /// The piece count is driven by the mesh's own bounding size rather than authored per asset:
@@ -60,6 +113,10 @@ pub struct FractureSettings {
     /// guard against a pathologically unbalanced subject, not a tuning dial. Lower it when memory
     /// matters more than the finest granularity.
     pub max_depth: u16,
+    /// How far a cut plane may slide off centre — see [`CutSettings::plane_jitter`].
+    pub plane_jitter: f32,
+    /// How much the largest-first cut order may be nudged — see [`CutSettings::size_spread`].
+    pub size_spread: f32,
 }
 
 impl Default for FractureSettings {
@@ -71,6 +128,8 @@ impl Default for FractureSettings {
             max_pieces: 40,
             min_fraction: 0.18,
             max_depth: 12,
+            plane_jitter: 0.35,
+            size_spread: 0.5,
         }
     }
 }
@@ -100,7 +159,40 @@ impl FractureSettings {
                     .to_string(),
             );
         }
+        // At 1.0 the jitter can put the plane exactly on the far extreme of the piece, where it
+        // divides nothing and the cut is lost — quietly, as one fewer fragment. Refuse at the door
+        // rather than emit a bake that is short of what was asked for.
+        if !(0.0..1.0).contains(&self.plane_jitter) {
+            return Err(format!(
+                "bevy_autogib: plane_jitter is {} — it must be in [0, 1). At 1.0 a plane can land on \
+                 the edge of the piece it is meant to divide, silently costing a fragment.",
+                self.plane_jitter
+            ));
+        }
+        if self.size_spread < 0.0 {
+            return Err(format!(
+                "bevy_autogib: size_spread is {} — negative would invert the cut order into \
+                 smallest-first, which is not a spread. Use 0.0 or more.",
+                self.size_spread
+            ));
+        }
         Ok(())
+    }
+
+    /// The geometry dials for one bake, with the piece count and seed the caller resolved.
+    ///
+    /// `target` comes from this resource's sizing policy applied to a particular mesh, and `seed`
+    /// from that asset's path — neither is a property of the settings alone, which is why they are
+    /// arguments rather than fields.
+    pub fn cut_for(&self, target: usize, seed: u32) -> CutSettings {
+        CutSettings {
+            target,
+            min_fraction: self.min_fraction,
+            max_depth: self.max_depth,
+            plane_jitter: self.plane_jitter,
+            size_spread: self.size_spread,
+            seed,
+        }
     }
 }
 

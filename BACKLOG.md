@@ -1,11 +1,11 @@
 # bevy_autogib — BACKLOG
 
-**Updated:** 2026-08-16
+**Updated:** 2026-08-17
 **Companions:** `CLAUDE.md` (rules), `README.md` (what the crate promises),
 `docs/research-brief.md` (the open problems), `docs/isomesh-upstream-asks.md` (what we need from the
 validator).
 
-**15 tickets archived, 4 open (AG-015 … AG-018).** The architectural change this backlog opened with
+**15 tickets archived, 5 landed this phase (AG-015 … AG-019), 0 open.** The architectural change this backlog opened with
 has landed: the crate no longer cuts the triangle soup. It cuts a caller-supplied convex proxy and
 carries the render triangles along as a payload.
 
@@ -178,7 +178,7 @@ unchanged and `tests/leaf.rs` stays green; no new type is named for a weapon or 
 | [x] | **AG-015 — the fracture hierarchy: one bake, every granularity.** Record the forest the cut loop already walks; keep parents instead of overwriting them. `FragmentTree`/`TreeNode`/`FragmentId`, frontier queries on `Fracture` and `FractureCache`, `FractureSettings::max_depth`. | M |
 | [x] | **AG-016 — the bond graph: which fragments actually touch.** Parent–child bonds from the tree are free but insufficient — two leaves of a common ancestor need not touch. Müller's coplanar-face match (sort faces by \|d\|, match equal-\|d\| opposite normals, planar convex∩convex overlap for the area) is exact for convex cells. Plus stateless `islands(graph, broken)`. | M |
 | [x] | **AG-017 — severance queries.** Five pure region→fragment-set functions: `spread` (nearest fragment then breadth-first along bonds with falloff — a bullet takes one chunk), `capsule`, `swept_triangle`, `radial`, `shear`. Falloff follows Blast: full inside `min_r`, linear to zero at `max_r`. | M |
-| [ ] | **AG-018 — the cheap look fixes, and delete `impact_dir`.** Offset the cut plane along its normal by a hashed fraction instead of always through the centroid; weight piece selection by `volume * (0.5 + hash)` on a stable node id so sizes spread Mott-ward. **This is the stage that moves emitted geometry** — regenerate `docs/fracture-tier-ab.gif`. `impact_dir` biased only the first two cut *normals*, never the plane position, was hardcoded `None` by the bake and passed `None` by every caller; the runtime queries supersede it, so it goes. | S |
+| [x] | **AG-018 — the cheap look fixes, and delete `impact_dir`.** Offset the cut plane along its normal by a hashed fraction instead of always through the centroid; weight piece selection by `volume * (0.5 + hash)` on a stable node id so sizes spread Mott-ward. **This is the stage that moves emitted geometry** — regenerate `docs/fracture-tier-ab.gif`. `impact_dir` biased only the first two cut *normals*, never the plane position, was hardcoded `None` by the bake and passed `None` by every caller; the runtime queries supersede it, so it goes. | S |
 
 ### AG-016, as landed
 
@@ -204,6 +204,65 @@ on real baked geometry.
 **No proximity fallback was added, deliberately.** Cells that touch without agreeing on a face get no
 bond, which is the normal case between V-HACD or CoACD root cells. Approximating there would weld a
 head to a torso with a tolerance no caller could tune, so it is refused and documented instead.
+
+| [x] | **AG-019 — a face too small to draw must not be shipped as a face.** Found while working AG-018, and it is a *pre-existing* defect: sweeping seeds showed **1 fragment in 320** coming back with `boundary_edges != 0`. Not caused by the jitter — jitter roughly doubled it, which is what made it visible. | S |
+
+### AG-018 and AG-019, as landed
+
+**AG-018's pre-registered prediction: the look dials move emitted geometry, so the GIF is
+regenerated and some pinned counts may need re-blessing.**
+
+**Falsified in the most useful direction — the geometry change did not need re-blessing, it needed a
+bug fixed.** Turning the jitter on turned `every_proxy_fragment_of_a_closed_solid_is_closed` red.
+The reflex reading is "geometry moved, re-bless it". Probing instead found the defect was **already
+there at `plane_jitter = 0`**: one fragment in 320, seed-dependent, and the pinned seeds simply
+missed it. The crate's central watertightness promise was seed-lucky, not true.
+
+**The mechanism, measured rather than guessed.** Repeated cutting leaves near-degenerate faces on a
+cell — a plane passing close to an existing vertex produces vertices `1.3e-4` apart, just past the
+`1e-4` weld. That face is real, but every triangle of its fan falls under the emitter's zero-area
+filter, so `append_cut_faces` and `soup_to_mesh` both drop it — and dropping a face from a closed
+cell opens it. The dumped fragment showed it exactly: face `[6,7,8]` over three near-collinear
+points, area `≈4e-7`, `boundary_edges: 3`, `χ = 1`.
+
+**One hypothesis was wrong and is recorded because it cost time.** `convex_ring` dedupes by snapping
+to a `WELD` lattice, which is a known-wrong idiom for coincidence — two points a nanometre apart on
+opposite sides of a grid line both survive. Replacing it with a distance test changed the defect
+count by **zero**, so it was reverted rather than shipped: a change that moves geometry and fixes
+nothing measured is exactly what this repo's norms warn against. (`CellBuilder::weld` still uses a
+bare lattice, while `mesh.rs`'s `AttributeWeld` uses a 27-cell probe for precisely this reason. Left
+alone deliberately — 0 defects in 9000 fragments after the real fix, so there is nothing to justify
+touching it.)
+
+**The fix:** `CellBuilder::build` now collapses any face whose Newell area falls under the shared
+`MIN_CROSS2`, merging its vertices transitively via union-find. A face that cannot be drawn is a
+vertex, not a face; merging closes the gap for free, because the sliver's two long edges become the
+same edge. `MIN_CROSS2` is now one constant shared by the three sites that apply it, so the cell's
+"will not build" and the emitter's "will not draw" cannot drift apart again.
+
+**Measured after: 0 defective fragments in 9000**, across 300 seeds × three jitter levels including
+`plane_jitter = 0.6`. The regression test is a **seed sweep**, not a pinned seed, because a pinned
+seed is what missed it.
+
+**AG-018's own measurement.** Largest/smallest fragment volume, median over 200 seeds:
+
+| `plane_jitter` | `size_spread` | ratio |
+|---|---|---|
+| 0.0 | 0.0 | ~2.5 |
+| 0.35 | 0.5 (shipped defaults) | ~4.1 |
+| 0.6 | 0.8 | ~10.6 |
+
+The test pins the *ordering* rather than those numbers, since pinning the ratios would re-bless on
+any change to the cut sequence — which is not the claim being made.
+
+**Two things grew that the ticket did not name.** `fracture_mesh` would have reached eight positional
+arguments, so the geometry dials became `CutSettings` — which also fixes the readability of a call
+that already read `(&parts, &proxy, 12, 0.15, 64, 0xC0FFEE)`. And `fracture_cube`'s size bar was
+keyed on max half-extent, which reads every slab as large and hides the size distribution entirely —
+the one thing these dials exist to change. It reads volume now.
+
+**`impact_dir` is gone**, as planned — though it went in AG-015 rather than here, because that ticket
+was already rewriting every call site.
 
 > **Weak-axis bias is deliberately deferred.** Choosing each cut normal to minimise cross-section
 > area — a cheap stand-in for Sellán's fracture modes, and what would make a character come apart at

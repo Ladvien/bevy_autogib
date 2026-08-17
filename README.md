@@ -70,14 +70,15 @@ let body = Mesh::from(Cuboid::new(1.0, 2.0, 1.0));
 // running V-HACD or CoACD for colliders has these, and a blocked-out subject can use `from_box`.
 let proxy = vec![ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.5, 1.0, 0.5))];
 
-let baked = bevy_autogib::fracture_mesh(
-    &[(&body, Mat4::IDENTITY)],
-    &proxy,
+// `CutSettings::new` takes the three dials every caller has an opinion about and fills in the
+// shape defaults; `plane_jitter` and `size_spread` are what stop every piece coming out the
+// same size. Assign to them to change how the break reads.
+let cut = bevy_autogib::CutSettings::new(
     12,          // finest fragment count
     0.15,        // stop cutting below this fraction of the subject's size
-    64,          // how many cuts deep the hierarchy may go
     0xC0FFEE,    // seed — same seed, same pieces, every run
 );
+let baked = bevy_autogib::fracture_mesh(&[(&body, Mat4::IDENTITY)], &proxy, &cut);
 
 // **One bake, every granularity.** The cut loop keeps each piece it split, so the same bake
 // answers "three pieces" and "all of them" without cutting twice.
@@ -179,7 +180,8 @@ Note what this does *not* claim. Fragment geometry is `f32` arithmetic, so cross
 | `AutogibSystems` | `SystemSet` | On `Update`. Gate it and order against it |
 | `FractureSubject(Handle<WorldAsset>)` | `Component` | What to break; the cache key and the seed source |
 | `DetachedPart` | `Component` | Subtree pruned out and baked as one intact chunk |
-| `FractureSettings` | `Resource` | Six bake dials; `init_resource`d, so yours wins if inserted first |
+| `FractureSettings` | `Resource` | Eight bake dials; `init_resource`d, so yours wins if inserted first |
+| `CutSettings` | struct | The geometry dials for one bake, without the ECS sizing policy |
 | `FractureCache` | `Resource` | `leaves()`, `frontier_of()`, `at_depth()`, `tree()`, `fragments()`, `detached_chunk()`, `is_baked()` |
 | `Fragment` / `DetachedChunk` | struct | Mesh handles + `center_local` + `half_extents` |
 | `FragmentTree` / `TreeNode` / `FragmentId` | struct | The hierarchy, and the frontier queries that read one bake at any granularity |

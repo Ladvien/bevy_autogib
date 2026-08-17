@@ -335,6 +335,7 @@ fn segment_hits_triangle(p: Vec3, q: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CutSettings;
     use crate::bond::BondSet;
     use crate::proxy::ProxyCell;
     use crate::soup::{Soup, fracture};
@@ -491,7 +492,7 @@ mod tests {
     fn the_queries_are_pure_and_reproducible() {
         let cells = vec![ProxyCell::from_box(Vec3::ZERO, Vec3::splat(0.5))];
         let build = || -> (BondGraph, FragmentTree) {
-            let (pieces, tree) = fracture(Soup::default(), &cells, 8, 0.05, 64, 0xD00D);
+            let (pieces, tree) = fracture(Soup::default(), &cells, &CutSettings::new(8, 0.05, 0xD00D));
             (crate::mesh::bond_graph(&pieces, &tree), tree)
         };
         let (ga, _) = build();

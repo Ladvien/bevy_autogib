@@ -387,6 +387,7 @@ pub fn audit_proxies(frags: &[FragmentGeometry]) -> Vec<SolidAudit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CutSettings;
     use crate::mesh::fracture_mesh;
     use crate::proxy::ProxyCell;
     use bevy::math::{Mat4, Vec3, primitives::Cuboid};
@@ -422,7 +423,7 @@ mod tests {
 
     /// Slack enough never to bind at any target these tests ask for, so nothing here is quietly
     /// measuring the depth bound instead of what it names.
-    const TEST_DEPTH: u16 = 64;
+
 
     /// The fracture `examples/fracture_cube.rs` runs, to the digit — read at its finest frontier,
     /// which is the set this fixture measured before the bake kept a hierarchy.
@@ -431,7 +432,97 @@ mod tests {
             (&parts[0], Mat4::IDENTITY),
             (&parts[1], Mat4::from_translation(Vec3::new(0.0, 0.67, 0.0))),
         ];
-        fracture_mesh(&placed, proxy, 12, 0.15, TEST_DEPTH, 0x00C0_FFEE).into_leaves()
+        fracture_mesh(&placed, proxy, &CutSettings::new(12, 0.15, 0x00C0_FFEE)).into_leaves()
+    }
+
+    /// **Watertightness across seeds, not at one lucky seed.**
+    ///
+    /// `every_proxy_fragment_of_a_closed_solid_is_closed` pins one seed, and that is exactly how this
+    /// defect hid: sweeping 40 seeds found **one fragment in 320** coming back with
+    /// `boundary_edges != 0`. The cause was a face too small to draw — repeated cutting leaves
+    /// slivers whose vertices sit just past the weld — which `append_cut_faces` then dropped as
+    /// zero-area, opening a cell the architecture proves is closed. `CellBuilder` now collapses such
+    /// a face instead of shipping it; see `collapse_undrawable_faces`.
+    ///
+    /// Kept as a sweep rather than a pinned seed **because a pinned seed is what missed it**. The
+    /// jitter levels matter too: an off-centre plane lands near an existing vertex more often, so a
+    /// bake with `plane_jitter` at zero is the easy case and the ones below it are the real test.
+    #[test]
+    fn every_fragment_is_closed_at_every_seed_and_jitter() {
+        let (cube, proxy) = cube_parts();
+        for (jitter, size_spread) in [(0.0f32, 0.0f32), (0.35, 0.5), (0.6, 1.0)] {
+            for seed in 0..60u32 {
+                let cut = CutSettings {
+                    plane_jitter: jitter,
+                    size_spread,
+                    ..CutSettings::new(10, 0.04, seed.wrapping_mul(2_654_435_761))
+                };
+                let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, &cut).into_leaves();
+                assert!(!pieces.is_empty(), "jitter {jitter}, seed {seed}: produced nothing");
+                for (i, a) in audit_proxies(&pieces).into_iter().enumerate() {
+                    assert_eq!(
+                        a.boundary_edges, 0,
+                        "jitter {jitter}, seed {seed}, fragment {i}: open cut — {a:?}"
+                    );
+                    assert!(
+                        a.supports_inside_outside,
+                        "jitter {jitter}, seed {seed}, fragment {i}: not a solid — {a:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The dials that answer "it looks like a frozen statue that shattered".**
+    ///
+    /// Always cutting the largest piece through its own centroid halves it, and halving every piece
+    /// every time drives fragment volumes toward each other — which is the uniform-shard read.
+    /// Sellán et al. name the symptom directly: geometric prefracture "results in recognizable,
+    /// unrealistic pieces". Real brittle fragments follow Mott's distribution, many small and few
+    /// large, so the useful measure is how far apart the largest and smallest end up.
+    ///
+    /// Measured over 200 seeds, largest/smallest fragment volume, median:
+    ///
+    /// | `plane_jitter` | `size_spread` | ratio |
+    /// |---|---|---|
+    /// | 0.0 | 0.0 | ~2.5 |
+    /// | 0.35 | 0.5 (the defaults) | ~4.1 |
+    /// | 0.6 | 0.8 | ~10.6 |
+    ///
+    /// This test pins the *ordering*, not those numbers: the dials must widen the spread, and the
+    /// defaults must widen it meaningfully over an unjittered bake. Pinning the ratios themselves
+    /// would re-bless on any change to the cut sequence, which is not what is being claimed here.
+    #[test]
+    fn the_shape_dials_widen_the_fragment_size_spread() {
+        let (cube, proxy) = cube_parts();
+        let median_ratio = |jitter: f32, size_spread: f32| -> f32 {
+            let mut ratios: Vec<f32> = Vec::new();
+            for seed in 0..60u32 {
+                let cut = CutSettings {
+                    plane_jitter: jitter,
+                    size_spread,
+                    ..CutSettings::new(12, 0.04, seed.wrapping_mul(2_654_435_761))
+                };
+                let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, &cut).into_leaves();
+                let mut v: Vec<f32> = pieces.iter().map(|f| f.cell.volume()).collect();
+                // SORT-OK: `total_cmp` over volumes; only the extremes are read, so ties are moot.
+                v.sort_by(|a, b| a.total_cmp(b));
+                if v.len() >= 4 && v[0] > 0.0 {
+                    ratios.push(v[v.len() - 1] / v[0]);
+                }
+            }
+            ratios.sort_by(|a, b| a.total_cmp(b));
+            ratios[ratios.len() / 2]
+        };
+
+        let flat = median_ratio(0.0, 0.0);
+        let default = median_ratio(0.35, 0.5);
+        let wide = median_ratio(0.6, 0.8);
+        assert!(
+            default > flat * 1.3,
+            "the shipped defaults must visibly widen the spread: {flat:.2} -> {default:.2}"
+        );
+        assert!(wide > default, "and turning them up must widen it further: {default:.2} -> {wide:.2}");
     }
 
     /// **AG-005 — the shipped mesh shares vertices, and still keeps its creases.**
@@ -510,7 +601,7 @@ mod tests {
             (&parts[1], Mat4::from_translation(Vec3::new(0.0, 0.67, 0.0))),
             (&cape, Mat4::IDENTITY),
         ];
-        let pieces = fracture_mesh(&placed, &proxy, 12, 0.15, TEST_DEPTH, 0x00C0_FFEE).into_leaves();
+        let pieces = fracture_mesh(&placed, &proxy, &CutSettings::new(12, 0.15, 0x00C0_FFEE)).into_leaves();
         assert!(!pieces.is_empty(), "the subject did not fracture");
 
         // The cape's triangles are the only ones with a -Z normal at z = -0.17, and they are
@@ -557,7 +648,7 @@ mod tests {
     fn fracture_output_is_bit_identical_across_runs() {
         let (cube, proxy) = cube_parts();
         let report = check_determinism(|out: &mut MeshBuffer<f32>| {
-            let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 8, 0.05, TEST_DEPTH, 0xC0FF_EE00).into_leaves();
+            let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, &CutSettings::new(8, 0.05, 0xC0FF_EE00)).into_leaves();
             for p in &pieces {
                 if let Some(m) = p.outer.as_ref() {
                     append(out, m);
@@ -583,7 +674,7 @@ mod tests {
     #[test]
     fn every_proxy_fragment_of_a_closed_solid_is_closed() {
         let (cube, proxy) = cube_parts();
-        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 8, 0.05, TEST_DEPTH, 0x5EED).into_leaves();
+        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, &CutSettings::new(8, 0.05, 0x5EED)).into_leaves();
         assert!(pieces.len() >= 2, "expected the cube to break, got {}", pieces.len());
         for (i, p) in pieces.iter().enumerate() {
             let a = crate::audit::audit_proxy(p).unwrap_or_else(|e| panic!("proxy {i} could not be audited: {e}"));
@@ -599,7 +690,7 @@ mod tests {
     #[test]
     fn fracture_conserves_volume() {
         let (cube, proxy) = cube_parts();
-        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 8, 0.05, TEST_DEPTH, 0x5EED).into_leaves();
+        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, &CutSettings::new(8, 0.05, 0x5EED)).into_leaves();
         let total: f32 = pieces.iter().filter_map(|p| crate::audit::audit_proxy(p).ok()).map(|a| a.signed_volume).sum();
         assert!(
             (total - 2.0).abs() < 1.0e-3,
@@ -648,7 +739,7 @@ mod tests {
     #[test]
     fn the_audit_welds_before_it_measures() {
         let (cube, proxy) = cube_parts();
-        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, 4, 0.05, TEST_DEPTH, 1).into_leaves();
+        let pieces = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &proxy, &CutSettings::new(4, 0.05, 1)).into_leaves();
         let a = audit_render(&pieces[0]).expect("the first fragment can be audited");
         assert!(
             a.vertices_after_weld < a.vertices_before_weld,

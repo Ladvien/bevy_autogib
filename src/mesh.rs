@@ -11,6 +11,7 @@ use bevy::log::warn;
 use bevy::math::{Mat3, Mat4, Vec2, Vec3};
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 
+use crate::CutSettings;
 use crate::bond::BondGraph;
 use crate::proxy::ProxyCell;
 use crate::soup::{Soup, fracture};
@@ -445,24 +446,14 @@ fn cell_bbox(cell: &ProxyCell) -> (Vec3, Vec3) {
 ///
 /// # Parameters
 ///
-/// Every `Mat4` is that sub-mesh's transform relative to the subject root. `min_fraction` stops a cell
-/// being cut once it drops below that fraction of the subject's *size* — a linear fraction, cubed
-/// internally to compare volumes, so no caller has to compute an extent first. `max_depth` bounds how
-/// many cuts deep the returned hierarchy goes, and with it the payload memory. `seed` drives every
-/// plane direction and is the only source of variation.
+/// Every `Mat4` is that sub-mesh's transform relative to the subject root; every other dial lives on
+/// [`CutSettings`], which documents each one.
 ///
-/// **`parts` order is load-bearing.** Cut planes pass through cell centroids, and the render payload's
-/// vertex order decides float sums elsewhere; float addition is not associative, so two different
-/// orders give fragments differing in the last bits. Sort `parts` by something authored (an asset path)
-/// if they came from anywhere order is not guaranteed; [`crate::bake`] does exactly that.
-pub fn fracture_mesh(
-    parts: &[(&Mesh, Mat4)],
-    proxy: &[ProxyCell],
-    target: usize,
-    min_fraction: f32,
-    max_depth: u16,
-    seed: u32,
-) -> Fracture {
+/// **`parts` order is load-bearing.** Cut planes are placed relative to cell centroids, and the render
+/// payload's vertex order decides float sums elsewhere; float addition is not associative, so two
+/// different orders give fragments differing in the last bits. Sort `parts` by something authored (an
+/// asset path) if they came from anywhere order is not guaranteed; [`crate::bake`] does exactly that.
+pub fn fracture_mesh(parts: &[(&Mesh, Mat4)], proxy: &[ProxyCell], cut: &CutSettings) -> Fracture {
     let mut soup = Soup::default();
     for (mesh, xform) in parts {
         append_mesh(&mut soup, mesh, *xform, false);
@@ -476,7 +467,7 @@ pub fn fracture_mesh(
     if soup.is_empty() {
         return Fracture::default();
     }
-    let (pieces, tree) = fracture(soup, proxy, target, min_fraction, max_depth, seed);
+    let (pieces, tree) = fracture(soup, proxy, cut);
     let bonds = bond_graph(&pieces, &tree);
     let fragments = pieces
         .into_iter()
@@ -608,10 +599,6 @@ mod tests {
         vec![ProxyCell::from_box(Vec3::ZERO, Vec3::splat(0.5))]
     }
 
-    /// Slack enough never to bind at any target these tests ask for, so a test that is about
-    /// something else is never quietly measuring the depth bound instead. The one test that *is*
-    /// about the bound passes its own.
-    const TEST_DEPTH: u16 = 64;
 
     /// A cut leaves each half on its own side, and the cap comes from the **cell**, not from loop
     /// recovery over the render mesh.
@@ -619,7 +606,7 @@ mod tests {
     fn slice_cube_axis_plane() {
         let (cube, _) = (Mesh::from(Cuboid::new(1.0, 1.0, 1.0)), ());
         let pieces =
-            fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), 2, 0.05, TEST_DEPTH, 7).into_leaves();
+            fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), &CutSettings::new(2, 0.05, 7)).into_leaves();
         assert_eq!(pieces.len(), 2, "one cut should give two pieces");
         for p in &pieces {
             assert!(p.cap.is_some(), "every piece of a cut carries a cap face");
@@ -646,8 +633,8 @@ mod tests {
     #[test]
     fn fracture_reaches_target_and_is_deterministic() {
         let proxy = cube_proxy();
-        let (a, ta) = fracture(cube_soup(), &proxy, 8, 0.05, TEST_DEPTH, 0xABCD_1234);
-        let (b, tb) = fracture(cube_soup(), &proxy, 8, 0.05, TEST_DEPTH, 0xABCD_1234);
+        let (a, ta) = fracture(cube_soup(), &proxy, &CutSettings::new(8, 0.05, 0xABCD_1234));
+        let (b, tb) = fracture(cube_soup(), &proxy, &CutSettings::new(8, 0.05, 0xABCD_1234));
         assert_eq!(a.len(), b.len());
         assert_eq!(ta, tb, "the hierarchy is reproducible, not just the geometry");
         let leaves = ta.leaves();
@@ -668,7 +655,7 @@ mod tests {
     #[test]
     fn every_frontier_of_one_bake_conserves_the_whole_volume() {
         let proxy = cube_proxy();
-        let (pieces, tree) = fracture(cube_soup(), &proxy, 8, 0.05, TEST_DEPTH, 0xABCD_1234);
+        let (pieces, tree) = fracture(cube_soup(), &proxy, &CutSettings::new(8, 0.05, 0xABCD_1234));
         let whole: f32 = proxy.iter().map(|c| c.volume()).sum();
         for cuts in 0..=tree.cuts() {
             let v: f32 = tree
@@ -689,7 +676,7 @@ mod tests {
     #[test]
     fn one_bake_answers_every_piece_count() {
         let cube = Mesh::from(Cuboid::new(1.0, 1.0, 1.0));
-        let baked = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), 8, 0.05, TEST_DEPTH, 11);
+        let baked = fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), &CutSettings::new(8, 0.05, 11));
         let finest = baked.leaves().len();
         assert!(finest >= 4, "expected a usable spread of granularities, got {finest}");
         for want in 1..=finest {
@@ -733,7 +720,7 @@ mod tests {
         assert!(below.is_some(), "the whole cell lies below it");
         // A `min_fraction` this large stops the recursion early; the loop must *terminate* there
         // rather than spin to its hard cap looking for a cut it is never allowed to make.
-        let (out, tree) = fracture(cube_soup(), &cube_proxy(), 4, 0.6, TEST_DEPTH, 42);
+        let (out, tree) = fracture(cube_soup(), &cube_proxy(), &CutSettings::new(4, 0.6, 42));
         assert!(!out.is_empty());
         assert!(tree.cuts() <= 4, "the volume floor bounded the cuts, got {}", tree.cuts());
         assert!(tree.leaves().len() <= 4, "and so bounded the finest frontier");
@@ -743,7 +730,7 @@ mod tests {
     /// spin, and it does not silently produce a deeper tree than asked for.
     #[test]
     fn max_depth_bounds_the_hierarchy_without_looping() {
-        let (_, tree) = fracture(cube_soup(), &cube_proxy(), 32, 0.001, 2, 0x5EED_1234);
+        let (_, tree) = fracture(cube_soup(), &cube_proxy(), &CutSettings { max_depth: 2, ..CutSettings::new(32, 0.001, 0x5EED_1234) });
         assert!(tree.cuts() > 0, "a depth of 2 still permits cuts");
         assert!(
             tree.iter().all(|(_, n)| n.depth <= 2),
@@ -759,7 +746,7 @@ mod tests {
     fn a_render_fragment_carries_no_cap_of_its_own() {
         let cube = Mesh::from(Cuboid::new(1.0, 1.0, 1.0));
         let pieces =
-            fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), 4, 0.05, TEST_DEPTH, 3).into_leaves();
+            fracture_mesh(&[(&cube, Mat4::IDENTITY)], &cube_proxy(), &CutSettings::new(4, 0.05, 3)).into_leaves();
         assert!(!pieces.is_empty());
         for p in &pieces {
             // The cap exists, and every one of its triangles came from the cell's cut faces.
@@ -775,8 +762,8 @@ mod tests {
         let cube = Mesh::from(Cuboid::new(1.0, 2.0, 1.0));
         let parts = [(&cube, Mat4::IDENTITY)];
         let proxy = vec![ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.5, 1.0, 0.5))];
-        let a = fracture_mesh(&parts, &proxy, 6, 0.05, TEST_DEPTH, 0xFEED_BEEF).into_leaves();
-        let b = fracture_mesh(&parts, &proxy, 6, 0.05, TEST_DEPTH, 0xFEED_BEEF).into_leaves();
+        let a = fracture_mesh(&parts, &proxy, &CutSettings::new(6, 0.05, 0xFEED_BEEF)).into_leaves();
+        let b = fracture_mesh(&parts, &proxy, &CutSettings::new(6, 0.05, 0xFEED_BEEF)).into_leaves();
 
         assert!(a.len() >= 2, "a 1x2x1 box should break into at least two pieces, got {}", a.len());
         assert_eq!(a.len(), b.len(), "same seed, same fragment count");
@@ -792,9 +779,9 @@ mod tests {
     /// An empty part list is not an error and not a panic — it is simply no fragments.
     #[test]
     fn fracture_mesh_of_nothing_is_empty() {
-        assert!(fracture_mesh(&[], &cube_proxy(), 8, 0.1, TEST_DEPTH, 1).tree.is_empty());
+        assert!(fracture_mesh(&[], &cube_proxy(), &CutSettings::new(8, 0.1, 1)).tree.is_empty());
         // And no proxy at all is a refusal, not a panic.
         let cube = Mesh::from(Cuboid::new(1.0, 1.0, 1.0));
-        assert!(fracture_mesh(&[(&cube, Mat4::IDENTITY)], &[], 8, 0.1, TEST_DEPTH, 1).tree.is_empty());
+        assert!(fracture_mesh(&[(&cube, Mat4::IDENTITY)], &[], &CutSettings::new(8, 0.1, 1)).tree.is_empty());
     }
 }

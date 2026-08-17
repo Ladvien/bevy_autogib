@@ -31,7 +31,7 @@
 //! Run: `cargo run -p bevy_autogib --example explode`
 
 use bevy::prelude::*;
-use bevy_autogib::{ProxyCell, fracture_mesh, hash_f32};
+use bevy_autogib::{CutSettings, ProxyCell, fracture_mesh, hash_f32};
 
 /// Target fragment count for one break.
 const TARGET: usize = 18;
@@ -39,6 +39,14 @@ const TARGET: usize = 18;
 const MIN_FRACTION: f32 = 0.12;
 /// How many cuts deep the hierarchy may go — slack enough here that `TARGET` is what binds.
 const MAX_DEPTH: u16 = 64;
+
+/// The geometry dials for this example's bake. `plane_jitter` and `size_spread` are what keep the
+/// pieces from all coming out the same size — at `0.0` each cut halves its piece through the centre
+/// and the result reads as uniform shards rather than debris.
+fn cut(seed: u32) -> CutSettings {
+    CutSettings { max_depth: MAX_DEPTH, ..CutSettings::new(TARGET, MIN_FRACTION, seed) }
+}
+
 /// Downward acceleration, m/s². Exaggerated — gibs read better when they fall fast.
 const GRAVITY: f32 = 18.0;
 /// How much speed survives a bounce off the ground plane.
@@ -242,7 +250,7 @@ fn break_it(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &DemoMater
         ProxyCell::from_box(Vec3::new(0.0, 0.74, 0.0), Vec3::splat(0.2)),
     ];
     let seed = 0x00C0_FFEE_u32.wrapping_add(nth.wrapping_mul(2_654_435_761));
-    let pieces = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, MAX_DEPTH, seed).into_leaves();
+    let pieces = fracture_mesh(&parts, &proxy, &cut(seed)).into_leaves();
 
     for (i, piece) in pieces.into_iter().enumerate() {
         // Deterministic per-fragment variation from the crate's own frozen hash — no rand dependency.

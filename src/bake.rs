@@ -433,14 +433,8 @@ pub fn bake_fractures(
         // feature unification. One code path that is concurrent in some consumers' builds and not
         // others is exactly the ambiguity `CLAUDE.md`'s one-path rule exists to prevent, and buying it
         // for 0.33 ms would be a bad trade twice over.
-        let (pieces, tree) = fracture(
-            body,
-            &proxy.0,
-            target,
-            settings.min_fraction,
-            settings.max_depth,
-            seed_from_path(&asset_path),
-        );
+        let (pieces, tree) =
+            fracture(body, &proxy.0, &settings.cut_for(target, seed_from_path(&asset_path)));
         let graph = crate::mesh::bond_graph(&pieces, &tree);
         let frags: Vec<Fragment> = pieces
             .into_iter()

@@ -471,6 +471,7 @@ fn intersect(p: (f32, f32), q: (f32, f32), sp: f32, sq: f32) -> Option<(f32, f32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CutSettings;
     use crate::soup::{Plane, fracture};
 
     fn unit_cube_cells() -> Vec<ProxyCell> {
@@ -529,7 +530,7 @@ mod tests {
     /// other while nothing is broken.
     #[test]
     fn a_baked_graph_is_symmetric_and_connected() {
-        let (pieces, tree) = fracture(crate::soup::Soup::default(), &unit_cube_cells(), 8, 0.05, 64, 0x1234);
+        let (pieces, tree) = fracture(crate::soup::Soup::default(), &unit_cube_cells(), &CutSettings::new(8, 0.05, 0x1234));
         let leaves = tree.leaves();
         let members: Vec<_> =
             leaves.iter().filter_map(|&id| pieces.get(id.index()).map(|p| (id, &p.cell))).collect();
@@ -552,7 +553,7 @@ mod tests {
     /// fragment alone; the rest stays a single connected body.
     #[test]
     fn severing_one_fragments_bonds_detaches_only_it() {
-        let (pieces, tree) = fracture(crate::soup::Soup::default(), &unit_cube_cells(), 8, 0.05, 64, 0x1234);
+        let (pieces, tree) = fracture(crate::soup::Soup::default(), &unit_cube_cells(), &CutSettings::new(8, 0.05, 0x1234));
         let leaves = tree.leaves();
         let members: Vec<_> =
             leaves.iter().filter_map(|&id| pieces.get(id.index()).map(|p| (id, &p.cell))).collect();
@@ -581,7 +582,7 @@ mod tests {
     /// Progressive damage: the set only grows, and islands only ever fragment further.
     #[test]
     fn repeated_severing_only_ever_breaks_things_further() {
-        let (pieces, tree) = fracture(crate::soup::Soup::default(), &unit_cube_cells(), 8, 0.05, 64, 0xBEEF);
+        let (pieces, tree) = fracture(crate::soup::Soup::default(), &unit_cube_cells(), &CutSettings::new(8, 0.05, 0xBEEF));
         let leaves = tree.leaves();
         let members: Vec<_> =
             leaves.iter().filter_map(|&id| pieces.get(id.index()).map(|p| (id, &p.cell))).collect();

@@ -39,7 +39,7 @@ use bevy::log::warn;
 use bevy::math::Vec3;
 use std::collections::HashMap;
 
-use crate::soup::{EPS, Plane, WELD, classify, plane_basis, signed_dist};
+use crate::soup::{EPS, MIN_CROSS2, Plane, WELD, classify, plane_basis, signed_dist};
 
 /// A convex cell of the caller-supplied proxy: the volume Tier A actually cuts.
 ///
@@ -224,6 +224,26 @@ impl ProxyCell {
             }
         }
         v6 / 6.0
+    }
+
+    /// How far the cell reaches either side of `from` along `dir`, as `(min, max)` signed distances.
+    ///
+    /// **The interval a cut plane may be offset within without leaving the cell.** `from` is the
+    /// centroid at every call site, which is interior to a convex cell, so `min < 0 < max` and any
+    /// offset strictly inside that range still divides the cell in two. Offsetting by a fraction of
+    /// the bounding *box* instead would not have that property: a cell that is thin along `dir` and
+    /// long across it would push its plane clean out and lose the cut.
+    ///
+    /// `(0, 0)` for a cell with no vertices, which [`ProxyCell::new`] cannot produce.
+    pub(crate) fn span_along(&self, dir: Vec3, from: Vec3) -> (f32, f32) {
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for v in &self.verts {
+            let d = (*v - from).dot(dir);
+            lo = lo.min(d);
+            hi = hi.max(d);
+        }
+        if self.verts.is_empty() { (0.0, 0.0) } else { (lo, hi) }
     }
 
     /// How many faces this cell has.
@@ -446,7 +466,91 @@ impl CellBuilder {
         }
     }
 
-    fn build(self) -> Option<ProxyCell> {
+    /// **Collapse any face too small to be drawn, rather than shipping a cell that will lose it.**
+    ///
+    /// Repeated cutting accumulates near-degenerate faces: a plane passing close to an existing
+    /// vertex leaves a sliver whose vertices sit just far enough apart to survive the weld. The
+    /// sliver is a real face of the cell, but every triangle of its fan falls under [`MIN_CROSS2`],
+    /// so [`ProxyCell::append_cut_faces`] and `soup_to_mesh` both drop it — and dropping a face from
+    /// a closed cell opens it. Measured: **one fragment in 320 came back with `boundary_edges != 0`**
+    /// on a cube cut into 8 across 40 seeds, entirely seed-dependent.
+    ///
+    /// A face that cannot be drawn is a vertex, not a face. Merging its vertices into one closes the
+    /// gap for free — the sliver's two long edges become the same edge, and the faces that used to
+    /// meet along it now meet directly. The merge is transitive (a union-find), because collapsing
+    /// one sliver can leave its neighbour a sliver too.
+    fn collapse_undrawable_faces(&mut self) {
+        let area2 = |ring: &[u32], verts: &[Vec3]| -> f32 {
+            // Newell: twice the area, as a vector, so a non-planar ring still measures sensibly.
+            let mut n = Vec3::ZERO;
+            for i in 0..ring.len() {
+                let a = verts[ring[i] as usize];
+                let b = verts[ring[(i + 1) % ring.len()] as usize];
+                n += a.cross(b);
+            }
+            n.length_squared()
+        };
+
+        let mut parent: Vec<u32> = (0..self.verts.len() as u32).collect();
+        fn find(parent: &mut [u32], mut i: u32) -> u32 {
+            while parent[i as usize] != i {
+                parent[i as usize] = parent[parent[i as usize] as usize];
+                i = parent[i as usize];
+            }
+            i
+        }
+        let mut merged = false;
+        for f in &self.faces {
+            if area2(f, &self.verts) >= MIN_CROSS2 {
+                continue;
+            }
+            let root = find(&mut parent, f[0]);
+            for &v in &f[1..] {
+                let r = find(&mut parent, v);
+                if r != root {
+                    parent[r as usize] = root;
+                    merged = true;
+                }
+            }
+        }
+        if !merged {
+            return;
+        }
+
+        // Each surviving group sits at the mean of what it absorbed, so the cell neither grows nor
+        // shrinks by the collapse.
+        let mut sum: HashMap<u32, (Vec3, f32)> = HashMap::new();
+        for v in 0..self.verts.len() as u32 {
+            let r = find(&mut parent, v);
+            let e = sum.entry(r).or_insert((Vec3::ZERO, 0.0));
+            e.0 += self.verts[v as usize];
+            e.1 += 1.0;
+        }
+        for (r, (s, n)) in &sum {
+            self.verts[*r as usize] = *s / *n;
+        }
+
+        let (faces, face_cut) = (std::mem::take(&mut self.faces), std::mem::take(&mut self.face_cut));
+        for (f, cut) in faces.into_iter().zip(face_cut) {
+            let mut idx: Vec<u32> = Vec::with_capacity(f.len());
+            for v in f {
+                let r = find(&mut parent, v);
+                if idx.last() != Some(&r) {
+                    idx.push(r);
+                }
+            }
+            if idx.len() > 1 && idx.first() == idx.last() {
+                idx.pop();
+            }
+            if idx.len() >= 3 && area2(&idx, &self.verts) >= MIN_CROSS2 {
+                self.faces.push(idx);
+                self.face_cut.push(cut);
+            }
+        }
+    }
+
+    fn build(mut self) -> Option<ProxyCell> {
+        self.collapse_undrawable_faces();
         if self.faces.len() < 4 {
             return None;
         }

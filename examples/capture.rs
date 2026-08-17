@@ -46,7 +46,7 @@ use bevy::{
     window::ExitCondition,
     winit::WinitPlugin,
 };
-use bevy_autogib::{FragmentGeometry, ProxyCell, audit_proxy, fracture_mesh, hash_f32};
+use bevy_autogib::{CutSettings, FragmentGeometry, ProxyCell, audit_proxy, fracture_mesh, hash_f32};
 
 /// Capture size. Small enough that 100 PNGs and the GIF built from them stay a reasonable thing to
 /// commit; large enough to see a cut face.
@@ -71,6 +71,14 @@ const TARGET: usize = 18;
 const MIN_FRACTION: f32 = 0.12;
 /// How many cuts deep the hierarchy may go — slack enough here that `TARGET` is what binds.
 const MAX_DEPTH: u16 = 64;
+
+/// The geometry dials for this example's bake. `plane_jitter` and `size_spread` are what keep the
+/// pieces from all coming out the same size — at `0.0` each cut halves its piece through the centre
+/// and the result reads as uniform shards rather than debris.
+fn cut(seed: u32) -> CutSettings {
+    CutSettings { max_depth: MAX_DEPTH, ..CutSettings::new(TARGET, MIN_FRACTION, seed) }
+}
+
 const SEED: u32 = 0x00C0_FFEE;
 const ORIGIN: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 
@@ -296,7 +304,7 @@ fn break_it(app: &mut SubApps) {
         ProxyCell::from_box(Vec3::ZERO, Vec3::new(0.35, 0.55, 0.2)),
         ProxyCell::from_box(Vec3::new(0.0, 0.74, 0.0), Vec3::splat(0.2)),
     ];
-    let pieces = fracture_mesh(&parts, &proxy, TARGET, MIN_FRACTION, MAX_DEPTH, SEED).into_leaves();
+    let pieces = fracture_mesh(&parts, &proxy, &cut(SEED)).into_leaves();
 
     // Audit first, so the tally can be logged next to the frames it describes.
     let verdicts: Vec<Verdict> = pieces.iter().map(Verdict::of).collect();

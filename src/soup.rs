@@ -9,6 +9,7 @@ use std::f32::consts::TAU;
 use bevy::log::{info, warn};
 use bevy::math::{Vec2, Vec3};
 
+use crate::CutSettings;
 use crate::proxy::ProxyCell;
 use crate::tree::{FragmentId, FragmentTree, TreeNode};
 
@@ -24,6 +25,16 @@ pub(crate) const EPS: f32 = 1.0e-5;
 /// about a different mesh: finer, and the cap↔skin seam reads as open purely from the mismatch;
 /// coarser, and it closes seams the slicer left open.
 pub(crate) const WELD: f32 = 1.0e-4;
+/// Squared length of the cross product below which a triangle is not worth emitting — the
+/// zero-area filter, in one place so the three sites that apply it cannot drift apart.
+///
+/// **Two of them agreeing is load-bearing.** [`crate::proxy::ProxyCell`] refuses to *build* a face
+/// this small, precisely because [`crate::proxy::ProxyCell::append_cut_faces`] and [`soup_to_mesh`]
+/// would refuse to *draw* it — and a face that exists in the cell but not in the emitted mesh is a
+/// hole in something the crate promises is closed. Measured before the two were tied together: a
+/// cube cut into 8 produced one fragment in 320 with `boundary_edges != 0`, seed-dependent, which
+/// is why the pinned seeds never showed it.
+pub(crate) const MIN_CROSS2: f32 = 1.0e-12;
 
 /// The crate's only random source: a 32-bit integer hash mapped into `[0, 1)`.
 ///
@@ -315,11 +326,9 @@ fn shells(soup: &Soup) -> Vec<Shell> {
 pub(crate) fn fracture(
     render: Soup,
     proxy: &[ProxyCell],
-    target: usize,
-    min_fraction: f32,
-    max_depth: u16,
-    seed: u32,
+    cut: &CutSettings,
 ) -> (Vec<Piece>, FragmentTree) {
+    let CutSettings { target, min_fraction, max_depth, plane_jitter, size_spread, seed } = *cut;
     // Tier B assignment. Every triangle goes to the first cell containing its centroid — first, not
     // nearest, because overlapping shells (a head sunk into a torso) are the normal case and a
     // deterministic tie-break beats a distance that can flip on a rounding difference.
@@ -399,13 +408,24 @@ pub(crate) fn fracture(
         if live.len() >= target.max(1) {
             break;
         }
-        // SORT-OK: `total_cmp` over volumes with the slot as tie-break — a total order, so the choice
-        // is a function of the geometry alone and not of the vector's incidental layout.
+        // **Which piece to cut next.** Strictly the largest by volume marches down a size order and
+        // levels everything toward the same size, which is the uniform-shard look; `size_spread`
+        // nudges the ranking by a stable per-node hash so a slightly smaller piece can win. The
+        // nudge keys on the *node id*, not the frontier slot, so it is a fixed property of the piece
+        // rather than something that shifts as the frontier grows.
+        let ranked = |node: usize| -> f32 {
+            let v = pieces[node].cell.volume();
+            if size_spread <= 0.0 {
+                return v;
+            }
+            let h = hash_f32(seed ^ (node as u32).wrapping_mul(0x9E37_79B9));
+            v * (1.0 - size_spread * 0.5 + size_spread * h)
+        };
+        // SORT-OK: `total_cmp` over the ranking with the slot as tie-break — a total order, so the
+        // choice is a function of the geometry alone and not of the vector's incidental layout.
         let Some(slot) = (0..live.len())
             .filter(|&s| !unsplittable[s])
-            .max_by(|&a, &b| {
-                pieces[live[a]].cell.volume().total_cmp(&pieces[live[b]].cell.volume()).then(b.cmp(&a))
-            })
+            .max_by(|&a, &b| ranked(live[a]).total_cmp(&ranked(live[b])).then(b.cmp(&a)))
         else {
             break;
         };
@@ -428,7 +448,20 @@ pub(crate) fn fracture(
         let s = seed
             .wrapping_add((cut_index as u32).wrapping_mul(2_654_435_761))
             .wrapping_add(live.len() as u32);
-        let plane = Plane { point: pieces[parent].cell.centroid(), normal: random_dir(s) };
+        let normal = random_dir(s);
+        let centroid = pieces[parent].cell.centroid();
+        // **Slide the plane off centre.** A plane through the centroid halves the piece, and halving
+        // every piece every time is what makes the output read as uniform shards. The offset is
+        // measured against how far *this* piece reaches along *this* normal, scaled back toward the
+        // centre by `plane_jitter` — so with jitter below 1.0 the plane is always strictly inside
+        // the cell and a cut can never be silently lost to a plane that missed.
+        let offset = if plane_jitter > 0.0 {
+            let (lo, hi) = pieces[parent].cell.span_along(normal, centroid);
+            (lo + (hi - lo) * hash_f32(s ^ 0x5BD1_E995)) * plane_jitter
+        } else {
+            0.0
+        };
+        let plane = Plane { point: centroid + normal * offset, normal };
 
         let (Some(above), Some(below)) = pieces[parent].cell.clip(&plane) else {
             unsplittable[slot] = true;
