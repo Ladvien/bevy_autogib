@@ -236,3 +236,30 @@ with `libm` as its only dependency, so `tests/leaf.rs` needed no widening.
 > intersected with a convex cell, which is provably a convex polygon and needs no CDT at all."* Two
 > code bases arrived at the same architecture from opposite ends. It also means AG-008 stays what its
 > own ticket says it is — a safety net, over-engineered on purpose — rather than the main event.
+
+### ☑ AG-009 · Retire the monorepo's copy of this crate
+
+*Rewritten before it was done — the original ticket ("re-split and push the public mirror") was void; see
+A-1.* `foundation_vs_slop` now consumes this crate as
+`bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "ba3b13b" }`, is no longer a
+workspace member, and `crates/bevy_autogib/` is deleted. Committed there as `f6ddc0f`.
+
+**The feature forward was verified, not assumed.** `test-harness` forwards `bevy_autogib/strict-order`,
+and that forward is what keeps the vertex-soup tie check alive in a release-built harness — losing it
+silently was the failure mode worth checking for. `cargo tree -e features -i bevy_autogib --features
+test-harness` shows `bevy_autogib feature "strict-order"` reaching the crate from
+`foundation_vs_slop feature "test-harness"`, and `cargo check --lib --features test-harness` compiles
+with the directory gone.
+
+**Order of operations, chosen so nothing was irreversible until it was proven safe:** push this branch →
+rewire the manifest → *resolve and verify the feature forward* → only then delete. A copy of the deleted
+directory was taken to the session scratchpad first, and every file in it was confirmed older than A-1's
+port, so nothing there was newer than what this repository already holds.
+
+**Deliberate restraint on the other repository.** That working tree carries ~60 files of unrelated
+in-flight work. The commit uses an explicit pathspec — manifest, lockfile, deletion — and touches none
+of it. The lockfile diff was checked first and is entirely this change: ten inserted lines, the git
+sources for `bevy_autogib` and `isomesh`.
+
+**Pinned to a branch rev, and that is temporary.** `ba3b13b` is on `backlog`. When that branch merges,
+re-pin to the merge commit on `main`.

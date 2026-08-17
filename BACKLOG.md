@@ -5,7 +5,7 @@
 `docs/research-brief.md` (the open problems), `docs/isomesh-upstream-asks.md` (what we need from the
 validator).
 
-**7 tickets archived, 8 open.** This backlog opens with an architectural change: the crate is going to
+**8 tickets archived, 7 open.** Phase 0 is complete. This backlog opens with an architectural change: the crate is going to
 stop cutting the triangle soup.
 
 **Read this before working any ticket below.** This crate is now an independent repository and
@@ -150,7 +150,6 @@ dissolve, and a fix nobody measured beforehand is indistinguishable from a fix t
 
 | | ID | Ticket | Size | Blocked by |
 |---|---|---|---|---|
-| ☐ | **AG-009** | **Retire the monorepo's copy of this crate.** *Rewritten — the original ticket ("re-split and push the public mirror") was **void**: it presumed a mirror relationship that no longer exists, and it was undoable as written, because `git subtree split` carries commits and `src/audit.rs` had none. See `BACKLOG_ARCHIVE.md`, A-1.*<br><br>This repository is now the source of truth, so `foundation_vs_slop/crates/bevy_autogib/` is a corpse that will silently diverge. In the monorepo root `Cargo.toml`: drop `"crates/bevy_autogib"` from `[workspace] members`, and replace the path dependency with `bevy_autogib = { git = "https://github.com/Ladvien/bevy_autogib", rev = "…" }`. Then delete the directory. Consumers are `src/autogib.rs` and `src/gore.rs`.<br>**Watch the feature forward:** the `test-harness` feature forwards `bevy_autogib/strict-order`, which is what keeps the vertex-soup tie check alive in a release-built harness. A git dependency forwards features exactly as a path dependency does, but verify it rather than assume — `cargo test --features test-harness` in the monorepo.<br>**Acceptance:** the monorepo builds and tests with no `crates/bevy_autogib` on disk; `strict-order` still reaches the crate. | S | — |
 
 ---
 
